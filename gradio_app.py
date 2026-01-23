@@ -5,7 +5,6 @@ from text_classification import JutsuClassifier
 from character_chatbot import CharacterChatBot
 import os
 from dotenv import load_dotenv
-load_dotenv()
 
 def get_themes(theme_list_str,subtitles_path,save_path):
     theme_list = theme_list_str.split(',')
