@@ -113,8 +113,8 @@ class CharacterChatBot():
                                                      trust_remote_code=True)
         model.config.use_cache = False
 
-        toknizer = AutoTokenizer.from_pretrained(base_model_name_or_path)
-        toknizer.pad_token = toknizer.eos_token
+        tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path)
+        tokenizer.pad_token = tokenizer.eos_token
 
         lora_alpha = 16
         lora_dropout = 0.1
@@ -153,7 +153,7 @@ class CharacterChatBot():
             peft_config=peft_config,
             dataset_text_field="prompt",
             max_seq_length=max_seq_len,
-            tokenizer=toknizer,
+            tokenizer=tokenizer,
             args = training_arguments,
         )
 
@@ -161,7 +161,7 @@ class CharacterChatBot():
 
         # Save model 
         trainer.model.save_pretrained("final_ckpt")
-        toknizer.save_pretrained("final_ckpt")
+        tokenizer.save_pretrained("final_ckpt")
 
         # Flush memory
         del trainer, model
