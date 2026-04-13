@@ -4,6 +4,8 @@ setlocal
 
 set "VENV_DIR=.venv"
 set "NEED_INSTALL=0"
+set "PYTHON_CMD="
+set "APP_PORT="
 
 echo.
 echo =====================================================
@@ -24,16 +26,18 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 ) else (
     echo Activating virtual environment...
     call "%VENV_DIR%\Scripts\activate.bat"
-    python -c "import gradio, transformers, pandas, dotenv" >nul 2>&1
+    python -c "import gradio, transformers, pandas, dotenv, scipy, torch; assert hasattr(torch, 'Tensor')" >nul 2>&1
     if errorlevel 1 (
         set "NEED_INSTALL=1"
     )
 )
 
+set "PYTHON_CMD=%CD%\%VENV_DIR%\Scripts\python.exe"
+
 if "%NEED_INSTALL%"=="1" (
     echo Installing dependencies...
-    pip install --upgrade pip
-    pip install -r requirements.txt
+    "%PYTHON_CMD%" -m pip install --upgrade pip
+    "%PYTHON_CMD%" -m pip install -i https://pypi.org/simple -r requirements.txt
 )
 
 if not exist .env (
@@ -43,17 +47,26 @@ if not exist .env (
     )
 )
 
+for /f %%P in ('"%PYTHON_CMD%" -c "import socket; port=7860
+while True:
+    with socket.socket() as s:
+        try:
+            s.bind(('127.0.0.1', port))
+            print(port)
+            break
+        except OSError:
+            port += 1"') do set "APP_PORT=%%P"
+
 echo.
 echo =====================================================
 echo    Starting Gradio Application
 echo =====================================================
 echo.
-echo The app will open at: http://127.0.0.1:7860
+echo The app will open at: http://127.0.0.1:%APP_PORT%
 echo Press Ctrl+C to stop the server
-echo The chatbot can use hosted or local Llama inference when available.
-echo If those are unavailable, it will fall back to the local demo chatbot.
 echo.
 
-python gradio_app.py
+set "GRADIO_SERVER_PORT=%APP_PORT%"
+"%PYTHON_CMD%" gradio_app.py
 
 pause
