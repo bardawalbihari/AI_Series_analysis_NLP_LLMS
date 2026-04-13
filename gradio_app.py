@@ -332,9 +332,7 @@ def get_themes(theme_list_str,subtitles_path,save_path):
         x="Theme",
         y="Score",
         title="Series Themes",
-        tooltip=["Theme","Score"],
-        width=500,
-        height=260
+        tooltip=["Theme","Score"]
     )
 
     return output_chart
