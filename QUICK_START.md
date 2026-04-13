@@ -1,196 +1,142 @@
-# AI Series Analysis NLP LLMs - FIXED ✓
+# Quick Start
 
-## Quick Start
+Use this file when you want the shortest path to running the project locally. The full project explanation, architecture, dataset notes, and interview-ready positioning are documented in README.md.
 
-Your project has been fixed and is ready to run! Here's what was done:
+## What You Get
 
-### Changes Made
+This repository is an end-to-end NLP portfolio project built around Naruto data. It includes:
 
-#### 🐛 Bug Fixes
-1. **character_chatbot.py** - Fixed 3 typos
-   - `toknizer` → `tokenizer` (lines 103, 106, 150)
-   - Would cause crashes when training models
+- Theme extraction from episode subtitles using zero-shot classification
+- Character relationship graph generation using named entity recognition and NetworkX
+- Jutsu text classification with a trainable transformer pipeline and a zero-shot fallback in the UI
+- A Naruto chatbot with hosted, local-model, and local retrieval-based runtime paths
+- A Gradio interface that ties all features together in one local application
 
-2. **named_entity_recognizer.py** - Fixed path resolution
-   - `pathlib.Path().parent.resolve()` → `pathlib.Path(__file__).parent.resolve()`
-   - Would break relative module imports
+## Recommended Environment
 
-#### ⚙️ Configuration Updates
-3. **requirements.txt** - Fixed installation issues
-   - Changed `git+https://github.com/huggingface/peft.git` to `peft==0.14.0`
-   - Prevents git clone failures
+- Python 3.11
+- 8 GB RAM minimum, 16 GB recommended
+- Windows, macOS, or Linux
+- Optional Hugging Face token for hosted or gated model access
 
-4. **.env** - Created configuration file
-   - Ready for HuggingFace token (get from https://huggingface.co/settings/tokens)
+## Setup
 
-### Installation
+### Windows PowerShell
 
-```bash
-# Install dependencies
+```powershell
+cd AI_Series_analysis_NLP_LLMS
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-
-# Or with conda
-conda install -c conda-forge -r requirements.txt
+Copy-Item .env_example .env -ErrorAction SilentlyContinue
 ```
 
-### Configuration
-
-Edit `.env` file and add your HuggingFace token:
-```
-huggingface_token=hf_YOUR_TOKEN_HERE
-```
-
-### Run the App
+### Windows Git Bash
 
 ```bash
-# Option 1: Direct run
-python gradio_app.py
-
-# Option 2: Use batch script (Windows)
-run_app.bat
-
-# Option 3: From Python
-python -c "from gradio_app import main; main()"
+cd AI_Series_analysis_NLP_LLMS
+py -3.11 -m venv .venv
+source .venv/Scripts/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+cp -n .env_example .env
 ```
 
-The app will be available at: **http://localhost:7860**
+### macOS or Linux
 
-## Project Structure
-
-```
-├── gradio_app.py                    # Main web interface
-├── .env                             # Configuration (HF token)
-├── requirements.txt                 # Dependencies
-│
-├── character_chatbot/               # Chatbot with LLMs
-│   ├── character_chatbot.py        # ✓ FIXED
-│   ├── character_chatbot_development.ipynb
-│   └── __init__.py
-│
-├── character_network/               # Character relationship graphs
-│   ├── character_netowork_generator.py
-│   ├── named_entity_recognizer.py  # ✓ FIXED
-│   ├── character_network_generator.ipynb
-│   └── __init__.py
-│
-├── text_classification/             # Custom text classifier
-│   ├── jutsu_classifier.py
-│   ├── cleaner.py
-│   ├── training_utils.py
-│   ├── custom_trainer.py
-│   ├── jutsu_classfier_development.ipynb
-│   └── __init__.py
-│
-├── theme_classifier/                # Zero-shot theme classification
-│   ├── theme_classifier.py
-│   ├── theme_classification_development.ipynb
-│   └── __init__.py
-│
-├── utils/                           # Shared utilities
-│   ├── data_loader.py
-│   └── __init__.py
-│
-├── crawler/                         # Web scraping (optional)
-│   └── jutsu_crawler.py
-│
-├── data/                            # Data files
-│   ├── naruto.csv
-│   ├── jutsus.jsonl
-│   └── Subtitles/
-│
-└── README.md                        # Original documentation
-```
-
-## Features
-
-### 1. Theme Classification
-Extract main themes from series using zero-shot classifiers
-
-### 2. Character Network
-Create interactive network graphs of character relationships using NER
-
-### 3. Text Classification
-Train custom LLM models to classify text (e.g., Jutsu types)
-
-### 4. Character Chatbot
-Chat with fine-tuned LLaMA 3 model acting as a series character
-
-### 5. Data Crawler
-Scrape web data to build custom datasets
-
-## System Requirements
-
-- **Python**: 3.8+
-- **Memory**: 16GB RAM (8GB minimum)
-- **Disk**: 50GB+ (for models and data)
-- **GPU**: Optional (CUDA-compatible for faster processing)
-
-## Dependencies
-
-Main packages:
-- `transformers` - Hugging Face models
-- `gradio` - Web interface
-- `torch` - Deep learning
-- `peft` - LoRA fine-tuning
-- `spacy` - NER and NLP
-- `nltk` - Text processing
-- `pyvis` - Network visualization
-- `scikit-learn` - ML utilities
-- `datasets` - Dataset handling
-- `bitsandbytes` - Model quantization
-
-## Troubleshooting
-
-### Issue: ModuleNotFoundError
-**Solution**: Ensure all dependencies are installed:
 ```bash
-pip install -r requirements.txt --upgrade
+cd AI_Series_analysis_NLP_LLMS
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+cp -n .env_example .env
 ```
 
-### Issue: HuggingFace token error
-**Solution**: Add token to `.env`:
-```bash
-echo "huggingface_token=hf_YOUR_TOKEN" > .env
+## Optional Configuration
+
+Add a Hugging Face token to .env if you want access to hosted or gated model paths:
+
+```env
+huggingface_token=hf_your_token_here
 ```
 
-### Issue: Out of memory
-**Solution**: Use CPU mode or reduce batch sizes in model code
+If you do not add a token, the app still runs locally. The chatbot will use the built-in local fallback instead of hosted inference.
 
-### Issue: Spacy model not found
-**Solution**: Download the model:
+## Optional NLP Model Downloads
+
+The character network feature can use cached NER output from stubs/ner_output.csv. If you want to regenerate NER from scratch, install a spaCy English model:
+
 ```bash
-python -m spacy download en_core_web_trf
-# Or lighter version:
 python -m spacy download en_core_web_sm
 ```
 
-## Files Modified
+The theme classifier uses NLTK sentence tokenization. NLTK resources are downloaded automatically the first time the feature runs.
 
-✅ `character_chatbot/character_chatbot.py` - Fixed tokenizer typo
-✅ `character_network/named_entity_recognizer.py` - Fixed path resolution  
-✅ `requirements.txt` - Fixed peft dependency
-✅ Created `.env` - Configuration file
-✅ Created test_imports.py - Validation script
-✅ Created FIX_SUMMARY.md - Detailed changes
-✅ Created run_app.bat - Windows launcher
+## Run
 
-## Next Steps
+### Cross-platform
 
-1. ✓ Install dependencies: `pip install -r requirements.txt`
-2. ✓ Configure HuggingFace token in `.env`
-3. ✓ Download Spacy models: `python -m spacy download en_core_web_trf`
-4. ✓ Run the app: `python gradio_app.py`
-5. ✓ Open browser: `http://localhost:7860`
+```bash
+python gradio_app.py
+```
 
-## Support
+### Windows launcher
 
-- **HuggingFace Docs**: https://huggingface.co/docs
-- **Gradio Docs**: https://www.gradio.app/docs/
-- **Spacy Docs**: https://spacy.io/
-- **PyTorch Docs**: https://pytorch.org/docs
+```bat
+run_app.bat
+```
 
----
+Open the app at http://127.0.0.1:7860
 
-**Status**: ✅ READY TO RUN  
-**Last Updated**: 2026-02-03  
-**All Critical Issues Fixed**: YES
+## Runtime Behavior
+
+- Theme classification works locally from subtitle files or the cached CSV output
+- Character network works from cached NER output immediately, or from fresh spaCy inference if a model is installed
+- Text classification uses a trained model only if you supply a valid model path or Hugging Face repo; otherwise the UI falls back to zero-shot classification across Ninjutsu, Genjutsu, and Taijutsu
+- Chatbot tries hosted inference first when a valid token is available, then attempts a local model path when suitable, and finally falls back to a local Naruto dialogue-based chatbot so the interface remains usable
+
+## Quick Validation
+
+After setup, these checks should pass:
+
+```bash
+python test_imports.py
+python gradio_app.py
+```
+
+## Troubleshooting
+
+### Imports fail after installation
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt --upgrade
+```
+
+### spaCy model missing
+
+```bash
+python -m spacy download en_core_web_sm
+```
+
+### Hugging Face access errors
+
+Confirm that your token is valid and has permission for the model or provider you want to use. The rest of the app can still run without that access.
+
+### Port 7860 is already in use
+
+Set a different port before launch:
+
+```bash
+set GRADIO_SERVER_PORT=7861
+python gradio_app.py
+```
+
+On macOS or Linux:
+
+```bash
+export GRADIO_SERVER_PORT=7861
+python gradio_app.py
+```
