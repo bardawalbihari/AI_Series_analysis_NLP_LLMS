@@ -1,17 +1,5 @@
 # Quick Start
 
-Use this file when you want the shortest path to running the project locally. The full project explanation, architecture, dataset notes, and interview-ready positioning are documented in README.md.
-
-## What You Get
-
-This repository is an end-to-end NLP portfolio project built around Naruto data. It includes:
-
-- Theme extraction from episode subtitles using zero-shot classification
-- Character relationship graph generation using named entity recognition and NetworkX
-- Jutsu text classification with a trainable transformer pipeline and a zero-shot fallback in the UI
-- A Naruto chatbot with hosted, local-model, and local retrieval-based runtime paths
-- A Gradio interface that ties all features together in one local application
-
 ## Recommended Environment
 
 - Python 3.11
@@ -62,7 +50,7 @@ Add a Hugging Face token to .env if you want access to hosted or gated model pat
 huggingface_token=hf_your_token_here
 ```
 
-If you do not add a token, the app still runs locally. The chatbot will use the built-in local fallback instead of hosted inference.
+If you do not add a token, the app still runs locally. The chatbot will answer from the local knowledge base instead of hosted inference.
 
 ## Optional NLP Model Downloads
 
@@ -95,7 +83,7 @@ Open the app at http://127.0.0.1:7860
 - Theme classification works locally from subtitle files or the cached CSV output
 - Character network works from cached NER output immediately, or from fresh spaCy inference if a model is installed
 - Text classification uses a trained model only if you supply a valid model path or Hugging Face repo; otherwise the UI falls back to zero-shot classification across Ninjutsu, Genjutsu, and Taijutsu
-- Chatbot tries hosted inference first when a valid token is available, then attempts a local model path when suitable, and finally falls back to a local Naruto dialogue-based chatbot so the interface remains usable
+- Chatbot retrieves local context first, then tries hosted inference when a valid token is available, then attempts a local model path when suitable, and finally falls back to grounded local answers
 
 ## Quick Validation
 

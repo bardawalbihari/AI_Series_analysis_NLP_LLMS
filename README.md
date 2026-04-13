@@ -1,50 +1,14 @@
 # Naruto Series Analysis with NLP and LLMs
 
-This repository is more than a UI mockup. It is a real end-to-end applied NLP project built around Naruto data, with data collection, preprocessing, model-driven analysis, graph generation, text classification, and conversational interaction exposed through a Gradio application.
+Naruto Series Analysis is a Gradio-based application for subtitle analysis, character network generation, jutsu classification, and Naruto-focused chat using local project data.
 
-The project is suitable for interview discussion and resume use because it demonstrates a complete workflow: dataset creation, NLP feature engineering, zero-shot inference, trainable transformer components, visualization, and application-layer integration.
+## Features
 
-## Why This Is a Real Project
-
-This codebase contains working implementations for multiple NLP tasks:
-
-- Subtitle ingestion from episode files in .ass and .srt formats
-- Theme extraction using Hugging Face zero-shot classification
-- Character relationship mining using sentence-level named entity recognition
-- Interactive network graph visualization with NetworkX and PyVis
-- Jutsu classification using a trainable transformer-based text classification pipeline
-- A multi-path Naruto chatbot interface with hosted inference, local-model support, and a local retrieval-style fallback
-- A Gradio application that unifies all features into one local product
-
-It is best described as a portfolio-grade NLP application. It is not a production SaaS system, but it is also not just a static demo. The analytics pipeline is real, the data files are real, and the UI executes actual model-backed or retrieval-backed workflows.
-
-## What The App Does
-
-### 1. Theme Classification
-
-The app reads subtitle scripts, splits them into sentence batches, and scores custom themes such as friendship, rivalry, and hard work using facebook/bart-large-mnli.
-
-### 2. Character Network Analysis
-
-The app extracts person entities from subtitle data, builds co-occurrence relationships across sentence windows, and renders an interactive character graph.
-
-### 3. Jutsu Text Classification
-
-The repository includes a transformer training pipeline for classifying jutsu descriptions into coarse labels such as Ninjutsu, Genjutsu, and Taijutsu. In the UI, if no trained model is supplied, the app falls back to zero-shot classification so the feature still works locally.
-
-### 4. Naruto Character Chatbot
-
-The chatbot is designed with layered runtime behavior:
-
-- Hosted inference when a compatible Hugging Face token and model access are available
-- Local model path when a suitable environment exists
-- Local Naruto dialogue fallback when heavyweight inference paths are unavailable
-
-That fallback design keeps the chatbot usable for local presentations while preserving the more advanced model paths for stronger environments.
-
-### 5. Data Collection and Reuse
-
-The repository also includes a crawler module and cached outputs in stubs/ so expensive NLP steps do not need to be recomputed every time.
+- Theme classification from subtitle files with zero-shot inference
+- Character network generation from named entity extraction and co-occurrence analysis
+- Jutsu text classification with a transformer pipeline and zero-shot fallback
+- Grounded Naruto chatbot using dialogue data, jutsu data, curated facts, and optional hosted inference
+- Cached outputs for repeated runs in stubs/
 
 ## Project Structure
 
@@ -55,7 +19,8 @@ AI_Series_analysis_NLP_LLMS/
 ├── run_app.bat                    # Windows helper script
 ├── .env_example                   # Environment variable template
 ├── data/
-│   ├── naruto.csv                 # Naruto dialogue data used by chatbot fallback
+│   ├── naruto.csv                 # Dialogue data used by the grounded chatbot
+│   ├── naruto_rag_facts.jsonl     # Curated facts used by chatbot retrieval
 │   ├── jutsus.jsonl               # Jutsu dataset for text classification
 │   └── Subtitles/                 # Episode subtitle files (.ass and .srt)
 ├── stubs/
@@ -76,41 +41,37 @@ AI_Series_analysis_NLP_LLMS/
     └── data_loader.py
 ```
 
-## Technical Workflow
+## Data
 
-### Data Layer
-
-- Subtitle files are loaded from data/Subtitles
-- Dialogue and metadata are transformed into analysis-ready text
-- Cached outputs in stubs/ allow repeated runs without full recomputation
-
-### NLP Layer
-
-- Zero-shot classification is used for theme extraction and UI fallback classification
-- spaCy-based named entity recognition drives character network construction
-- Transformer-based text classification supports trainable jutsu labeling
-- Chatbot routing selects the best available inference path at runtime
-
-### Application Layer
-
-- Gradio provides a single interface for all workflows
-- The UI is intentionally local-first so it can run on a laptop during interviews or demos
-- Environment-sensitive fallbacks reduce failures when tokens, GPU support, or gated model access are unavailable
-
-## Dataset Snapshot
-
-The repository already includes enough data to showcase real NLP workflows:
-
-- Episode subtitle corpus in data/Subtitles
-- Naruto dialogue dataset in data/naruto.csv
-- Jutsu dataset in data/jutsus.jsonl
-- Cached analytics outputs in stubs/
-
-This is sufficient for a strong showcase of applied NLP pipelines, even though it is not large enough to claim a deeply specialized production conversational model.
+- data/Subtitles contains episode subtitle files in .ass and .srt format
+- data/naruto.csv contains dialogue lines used by the chatbot
+- data/jutsus.jsonl contains jutsu names, types, and descriptions
+- data/naruto_rag_facts.jsonl contains short curated facts used by retrieval
+- stubs contains cached outputs for theme classification and NER
 
 ## Setup
 
 Python 3.11 is the recommended version for the current dependency set.
+
+## Quick Start
+
+### Windows
+
+Double-click run_app.bat
+
+### Git Bash
+
+```bash
+bash run_app.sh
+```
+
+### Direct Python launch
+
+```bash
+./.venv/Scripts/python.exe gradio_app.py
+```
+
+The launcher scripts create .venv if needed, install dependencies, verify the core runtime stack, copy .env from .env_example, choose a free port starting from 7860, and start the app.
 
 ### Windows PowerShell
 
@@ -153,7 +114,7 @@ Add a Hugging Face token to .env if you want hosted or gated model access:
 huggingface_token=hf_your_token_here
 ```
 
-This token is optional for general local use. The project will still run without it, and the chatbot will fall back to the local Naruto dialogue mode.
+This token is optional. Without it, the chatbot still answers using the local knowledge base and fallback logic.
 
 ## Optional Downloads
 
@@ -176,13 +137,19 @@ The theme classification module downloads required tokenizer resources automatic
 ### Main command
 
 ```bash
-python gradio_app.py
+./.venv/Scripts/python.exe gradio_app.py
 ```
 
 ### Windows helper script
 
 ```bat
 run_app.bat
+```
+
+### Git Bash helper script
+
+```bash
+bash run_app.sh
 ```
 
 The app launches locally at http://127.0.0.1:7860 by default.
@@ -210,32 +177,12 @@ export GRADIO_SERVER_PORT=7861
 python gradio_app.py
 ```
 
-## Feature Availability Matrix
+## Runtime Notes
 
-| Feature | Works locally by default | Extra requirements |
-|---|---|---|
-| Theme classification | Yes | None beyond requirements.txt |
-| Character network from cached NER | Yes | None |
-| Character network from fresh NER | Yes | spaCy English model |
-| Jutsu classification | Yes | Trained model path for transformer mode, otherwise zero-shot fallback |
-| Chatbot | Yes | Token/model access only needed for hosted or gated model paths |
-| Crawler | Yes | Network access and target site availability |
-
-## How To Present This In An Interview
-
-You can accurately describe the project as:
-
-- An end-to-end NLP application built around anime subtitle and metadata analysis
-- A project that combines zero-shot inference, named entity recognition, network analysis, text classification, and conversational AI in one interface
-- A local-first Gradio product designed to remain usable even when heavyweight hosted inference is unavailable
-- A system that balances real model-backed processing with fallback design for reliable demonstrations
-
-Good technical talking points include:
-
-- Designing cache-aware NLP pipelines to avoid repeated expensive inference
-- Using fallback strategies to keep features operational across different machines
-- Separating data ingestion, model logic, and UI orchestration into modules
-- Working with real tradeoffs between local inference, hosted inference, and constrained hardware
+- Theme classification runs from subtitle files or cached theme output
+- Character network runs from cached NER output or fresh spaCy inference
+- Jutsu classification uses a supplied trained model when available, otherwise zero-shot fallback
+- Chatbot retrieves local context first, then uses hosted or local model inference when available
 
 ## Validation
 
@@ -246,7 +193,7 @@ python test_imports.py
 python gradio_app.py
 ```
 
-If the app starts and the four interface sections render, the project is ready for local showcase.
+If the app starts and the interface renders, the setup is working.
 
 ## Troubleshooting
 
@@ -257,6 +204,8 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt --upgrade
 ```
 
+If Torch or SciPy was partially installed, rerun the launcher script. It now checks the core runtime imports before startup and reinstalls dependencies automatically when the environment is broken.
+
 ### spaCy model not found
 
 ```bash
@@ -265,11 +214,11 @@ python -m spacy download en_core_web_sm
 
 ### Hugging Face hosted inference fails
 
-This usually means the token is missing, invalid, or does not have access to the required model or provider. The local fallback chatbot should still work.
+This usually means the token is missing, invalid, or does not have access to the required model or provider. The local chatbot path should still work.
 
 ### Local LLM path is not available on Windows
 
-That is expected on many Windows laptops without a compatible GPU or quantization stack. Use the hosted path when available, otherwise use the built-in chatbot fallback for local showcase.
+That can happen on Windows systems without a compatible GPU or quantization stack. Hosted or grounded local fallback behavior is still available.
 
 ### Feature feels slow on first run
 
@@ -288,6 +237,3 @@ The first execution can download models and tokenizer resources. Later runs are 
 - python-dotenv
 - datasets
 
-## Resume-Safe Summary
-
-Built a local-first NLP application for anime content analysis using Gradio, Hugging Face transformers, spaCy, NetworkX, and PyVis. Implemented subtitle ingestion, zero-shot theme extraction, named-entity-based character network generation, transformer-driven jutsu classification, and a multi-path Naruto chatbot with hosted and local fallback inference strategies.
