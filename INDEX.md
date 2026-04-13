@@ -1,3 +1,7 @@
+# Documentation Index
+
+README.md is the primary document for the current project overview, setup, run instructions, and interview-facing description. The other files in this folder are supplementary or historical notes.
+
 # 📖 DOCUMENTATION INDEX
 
 ## Your Project Has Been Fixed! 🎉

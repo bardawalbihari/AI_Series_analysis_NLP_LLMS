@@ -11,14 +11,24 @@ from utils import load_subtitles_dataset
 
 class NamedEntityRecognizer:
     def __init__(self):
-        self.nlp_model = self.load_model()
-        pass
+        self.nlp_model = None
 
     def load_model(self):
-        nlp = spacy.load("en_core_web_trf")
-        return nlp
+        model_names = ["en_core_web_trf", "en_core_web_sm"]
+        last_error = None
+        for model_name in model_names:
+            try:
+                return spacy.load(model_name)
+            except OSError as exc:
+                last_error = exc
+        raise OSError(
+            "spaCy English model not found. Install en_core_web_trf or en_core_web_sm to regenerate NER output."
+        ) from last_error
 
     def get_ners_inference(self,script):
+        if self.nlp_model is None:
+            self.nlp_model = self.load_model()
+
         script_sentences = sent_tokenize(script)
 
         ner_output = []

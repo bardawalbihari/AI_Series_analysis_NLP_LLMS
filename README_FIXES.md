@@ -1,3 +1,7 @@
+# Historical Fix Notes
+
+This file is a historical record of earlier repair work. For the current project description, setup steps, runtime behavior, and interview-ready summary, use README.md as the source of truth.
+
 # 🎊 PROJECT RECOVERY COMPLETE
 
 ## Overview

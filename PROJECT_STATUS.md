@@ -1,3 +1,7 @@
+# Historical Status Report
+
+This file summarizes an earlier stabilization pass. For the current project scope, supported runtime modes, setup instructions, and accurate feature status, use README.md as the source of truth.
+
 # 🎉 PROJECT FIX COMPLETE - STATUS REPORT
 
 ## Summary
