@@ -1,0 +1,3699 @@
+From b2b6d3d1079e4eaab1bbe320d5e613dbbdb331a5 Mon Sep 17 00:00:00 2001
+From: Bardawal-Bihari_PWSCLLC <Bardawal.Bihari@powerschool.com>
+Date: Mon, 13 Apr 2026 21:46:01 +0530
+Subject: [PATCH] Refine Gradio UI and improve Naruto chatbot conversation flow
+
+---
+ ...kflows-and-harden-local-inference-ru.patch | 672 ++++++++++++
+ 0002-Update-readme.patch                      | 655 ++++++++++++
+ INDEX.md                                      | 124 +--
+ PROJECT_STATUS.md                             | 125 +--
+ QUICK_START.md                                |  16 +-
+ README.md                                     | 148 +--
+ README_FIXES.md                               | 123 +--
+ character_chatbot/__init__.py                 |  12 +-
+ character_chatbot/rag_chatbot.py              | 443 ++++++++
+ data/naruto_rag_facts.jsonl                   |  13 +
+ gradio_app.py                                 | 956 ++++++++++++++++--
+ requirements.txt                              |   1 +
+ run_app.bat                                   |  27 +-
+ run_app.sh                                    |  59 ++
+ 14 files changed, 2838 insertions(+), 536 deletions(-)
+ create mode 100644 0001-Refactor-NLP-workflows-and-harden-local-inference-ru.patch
+ create mode 100644 0002-Update-readme.patch
+ create mode 100644 character_chatbot/rag_chatbot.py
+ create mode 100644 data/naruto_rag_facts.jsonl
+ create mode 100644 run_app.sh
+
+diff --git a/0001-Refactor-NLP-workflows-and-harden-local-inference-ru.patch b/0001-Refactor-NLP-workflows-and-harden-local-inference-ru.patch
+new file mode 100644
+index 0000000..4ede960
+--- /dev/null
++++ b/0001-Refactor-NLP-workflows-and-harden-local-inference-ru.patch
+@@ -0,0 +1,672 @@
++From d6122b1064ce1458517b04a832462a94d67edbfb Mon Sep 17 00:00:00 2001
++From: Bardawal-Bihari_PWSCLLC <Bardawal.Bihari@powerschool.com>
++Date: Mon, 13 Apr 2026 18:32:25 +0530
++Subject: [PATCH 1/2] Refactor NLP workflows and harden local inference/runtime
++ paths
++
++---
++ .gitignore                                   |   5 +-
++ character_network/named_entity_recognizer.py |  18 +-
++ gradio_app.py                                | 364 +++++++++++++++++--
++ requirements.txt                             |  22 +-
++ run_app.bat                                  |  41 ++-
++ utils/data_loader.py                         |  58 ++-
++ 6 files changed, 444 insertions(+), 64 deletions(-)
++
++diff --git a/.gitignore b/.gitignore
++index 79a7b08..3655b64 100644
++--- a/.gitignore
+++++ b/.gitignore
++@@ -1,4 +1,7 @@
++ *.pyc
++ *.ipynb_checkpoints
++ .env
++-*__pycache__/
++\ No newline at end of file
+++*__pycache__/
+++.venv/
+++venv/
+++my_env/
++\ No newline at end of file
++diff --git a/character_network/named_entity_recognizer.py b/character_network/named_entity_recognizer.py
++index 24a741f..c267685 100644
++--- a/character_network/named_entity_recognizer.py
+++++ b/character_network/named_entity_recognizer.py
++@@ -11,14 +11,24 @@ from utils import load_subtitles_dataset
++ 
++ class NamedEntityRecognizer:
++     def __init__(self):
++-        self.nlp_model = self.load_model()
++-        pass
+++        self.nlp_model = None
++ 
++     def load_model(self):
++-        nlp = spacy.load("en_core_web_trf")
++-        return nlp
+++        model_names = ["en_core_web_trf", "en_core_web_sm"]
+++        last_error = None
+++        for model_name in model_names:
+++            try:
+++                return spacy.load(model_name)
+++            except OSError as exc:
+++                last_error = exc
+++        raise OSError(
+++            "spaCy English model not found. Install en_core_web_trf or en_core_web_sm to regenerate NER output."
+++        ) from last_error
++ 
++     def get_ners_inference(self,script):
+++        if self.nlp_model is None:
+++            self.nlp_model = self.load_model()
+++
++         script_sentences = sent_tokenize(script)
++ 
++         ner_output = []
++diff --git a/gradio_app.py b/gradio_app.py
++index efc0ca0..1de8888 100644
++--- a/gradio_app.py
+++++ b/gradio_app.py
++@@ -1,16 +1,301 @@
++-import gradio as gr
++-from theme_classifier import ThemeClassifier
++-from character_network import NamedEntityRecognizer, CharacterNetworkGenerator
++-from text_classification import JutsuClassifier
++-from character_chatbot import CharacterChatBot
++ import os
+++import re
+++from functools import lru_cache
+++from pathlib import Path
+++
+++import gradio as gr
+++import pandas as pd
++ from dotenv import load_dotenv
++ 
+++
+++load_dotenv()
+++
+++REPO_ROOT = Path(__file__).resolve().parent
+++DEFAULT_CHATBOT_MODEL = "AbdullahTarek/Naruto_Llama-3-8B"
+++DEFAULT_HOSTED_CHAT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+++DEFAULT_TEXT_CLASSIFIER_MODEL = "demo-auto"
+++JUTSU_LABELS = ["Ninjutsu", "Genjutsu", "Taijutsu"]
+++
+++
+++def _resolve_path(path_str):
+++    path = Path(path_str)
+++    if not path.is_absolute():
+++        path = REPO_ROOT / path
+++    return path
+++
+++
+++def _path_exists(path_str):
+++    return _resolve_path(path_str).exists()
+++
+++
+++def _repo_exists(repo_id):
+++    try:
+++        from huggingface_hub import repo_exists
+++
+++        return repo_exists(repo_id, token=os.getenv("huggingface_token"))
+++    except Exception:
+++        return False
+++
+++
+++def _model_path_exists(model_path):
+++    if not model_path or model_path == DEFAULT_TEXT_CLASSIFIER_MODEL:
+++        return False
+++    return _path_exists(model_path) or _repo_exists(model_path)
+++
+++
+++def _clean_chat_text(text):
+++    cleaned = re.sub(r"\(.*?\)", " ", str(text))
+++    cleaned = re.sub(r"\s+", " ", cleaned)
+++    return cleaned.strip()
+++
+++
+++def _require_huggingface_token():
+++    huggingface_token = os.getenv("huggingface_token")
+++    if not huggingface_token:
+++        raise gr.Error(
+++            "Missing huggingface_token in .env. Add a Hugging Face token before using the chatbot."
+++        )
+++    return huggingface_token
+++
+++
+++class HostedNarutoChatbot:
+++    def __init__(self, model_name, huggingface_token):
+++        from huggingface_hub import InferenceClient
+++
+++        self.client = InferenceClient(
+++            base_url="https://router.huggingface.co/v1",
+++            api_key=huggingface_token,
+++        )
+++        self.model_name = model_name
+++        self.system_prompt = (
+++            'You are Naruto Uzumaki from the anime "Naruto". '
+++            "Respond in-character, energetic, determined, and concise. "
+++            "Handle both everyday small-talk and Naruto-specific questions naturally."
+++        )
+++
+++    def chat(self, message, history):
+++        messages = [{"role": "system", "content": self.system_prompt}]
+++        for user_message, assistant_message in history:
+++            messages.append({"role": "user", "content": user_message})
+++            messages.append({"role": "assistant", "content": assistant_message})
+++        messages.append({"role": "user", "content": message})
+++
+++        output = self.client.chat_completion(
+++            model=self.model_name,
+++            messages=messages,
+++            max_tokens=256,
+++            temperature=0.7,
+++            top_p=0.9,
+++        )
+++        return output.choices[0].message.content.strip()
+++
+++
+++class LocalNarutoDemoChatbot:
+++    def __init__(self, data_path):
+++        from sklearn.feature_extraction.text import TfidfVectorizer
+++        from sklearn.metrics.pairwise import cosine_similarity
+++
+++        transcript_df = pd.read_csv(_resolve_path(data_path)).dropna(subset=["name", "line"])
+++        transcript_df["name"] = transcript_df["name"].astype(str).str.strip()
+++        naruto_lines = transcript_df.loc[transcript_df["name"] == "Naruto", "line"]
+++        self.lines = [_clean_chat_text(line) for line in naruto_lines.tolist()]
+++        self.lines = [line for line in self.lines if len(line) > 20]
+++        self.default_lines = [
+++            "I never go back on my word. That's my nindo, my ninja way!",
+++            "Believe it! I'm going to keep pushing until I figure this out.",
+++            "If you want to protect your friends, you don't give up halfway.",
+++        ]
+++        self.intent_responses = [
+++            (("hello", "hi", "hey", "yo"), "Hey! I'm Naruto Uzumaki. What's up? Believe it!"),
+++            (("how are you", "how're you", "hows it going"), "I'm fired up and ready to go! Nothing's gonna stop me from becoming Hokage."),
+++            (("who are you", "what is your name", "your name"), "I'm Naruto Uzumaki, future Hokage of the Hidden Leaf Village!"),
+++            (("what can you do", "help me", "can you help"), "I can chat with you, talk about Konoha, my friends, ramen, jutsu, and what it means to never give up."),
+++            (("thank you", "thanks"), "Heh, no problem! That's what comrades are for."),
+++            (("bye", "goodbye", "see you"), "See ya! Keep training and don't give up!"),
+++            (("favorite food", "favourite food", "ramen"), "Easy. Ramen. Ichiraku ramen is the best, no question."),
+++            (("hokage", "become hokage", "why hokage"), "I'm going to become Hokage so everyone acknowledges me and I can protect the village."),
+++            (("nindo", "ninja way"), "My ninja way is simple: I never go back on my word. That's my nindo!"),
+++            (("sasuke",), "Sasuke's my rival and my friend. Even when he pushes people away, I don't give up on him."),
+++            (("sakura",), "Sakura is strong, smart, and not someone you should underestimate."),
+++            (("kakashi",), "Kakashi-sensei acts lazy, but he's one of the smartest and strongest ninja around."),
+++            (("iruka",), "Iruka-sensei was one of the first people who really believed in me. I won't forget that."),
+++            (("kurama", "nine tails", "nine-tailed fox"), "Kurama and I had a rough start, but real strength comes from understanding each other."),
+++            (("konoha", "leaf village", "hidden leaf"), "Konoha is my home. No matter what happens, I'll protect it."),
+++            (("shadow clone", "clone jutsu"), "Shadow Clone Jutsu lets me make solid copies of myself. It's one of my signature moves."),
+++            (("chakra",), "Chakra is the energy ninja use for techniques. Controlling it properly is a huge part of becoming strong."),
+++            (("ninjutsu",), "Ninjutsu are ninja techniques powered by chakra. Shadow Clones, Rasengan, all that good stuff."),
+++            (("genjutsu",), "Genjutsu messes with your senses. You've gotta break the illusion if you want to win."),
+++            (("taijutsu",), "Taijutsu is hand-to-hand combat. No tricks, just pure fighting skill and guts."),
+++            (("rasengan",), "The Rasengan is a high-level chakra technique. Hard to master, but totally worth it."),
+++            (("dream", "goal"), "My goal is to become Hokage and earn everyone's respect the right way."),
+++        ]
+++        self.vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
+++        self.embeddings = self.vectorizer.fit_transform(self.lines)
+++        self.cosine_similarity = cosine_similarity
+++
+++    def _normalize_message(self, message):
+++        normalized = _clean_chat_text(message).lower()
+++        normalized = re.sub(r"[^a-z0-9\s'-]", " ", normalized)
+++        return re.sub(r"\s+", " ", normalized).strip()
+++
+++    def _get_curated_response(self, message):
+++        normalized = self._normalize_message(message)
+++
+++        if not normalized:
+++            return self.default_lines[0]
+++
+++        for keywords, response in self.intent_responses:
+++            if any(re.search(rf"\b{re.escape(keyword)}\b", normalized) for keyword in keywords):
+++                return response
+++
+++        if normalized.endswith("?") or normalized.startswith(("what", "why", "how", "when", "where", "can ", "do ", "are ")):
+++            return (
+++                "Heh, I might not know every single thing, but ask me about my friends, Konoha, ramen, jutsu, or becoming Hokage and I've got plenty to say."
+++            )
+++
+++        return None
+++
+++    def chat(self, message, history):
+++        used_responses = {assistant_message.strip() for _, assistant_message in history if assistant_message}
+++        curated_response = self._get_curated_response(message)
+++        if curated_response is not None:
+++            return curated_response
+++
+++        query_parts = [message]
+++        if history:
+++            query_parts.extend(text for pair in history[-2:] for text in pair if text)
+++        query = _clean_chat_text(" ".join(query_parts))
+++
+++        if not query:
+++            return self.default_lines[0]
+++
+++        similarity_scores = self.cosine_similarity(
+++            self.vectorizer.transform([query]),
+++            self.embeddings,
+++        ).ravel()
+++
+++        ranked_indexes = similarity_scores.argsort()[::-1]
+++        for index in ranked_indexes[:10]:
+++            candidate = self.lines[index]
+++            if candidate not in used_responses:
+++                if similarity_scores[index] < 0.05:
+++                    break
+++                return candidate
+++
+++        return self.default_lines[len(history) % len(self.default_lines)]
+++
+++
+++class CharacterChatbotFacade:
+++    def __init__(self):
+++        self.primary_chatbot = None
+++        self.primary_disabled = False
+++        self.primary_error = None
+++        self.local_model_attempted = False
+++        self.local_model_chatbot = None
+++        self.demo_chatbot = None
+++
+++    def _get_primary_chatbot(self):
+++        if self.primary_disabled:
+++            return None
+++        if self.primary_chatbot is not None:
+++            return self.primary_chatbot
+++
+++        token = os.getenv("huggingface_token")
+++        if not token:
+++            self.primary_disabled = True
+++            self.primary_error = "Missing huggingface_token in .env."
+++            return None
+++
+++        self.primary_chatbot = HostedNarutoChatbot(
+++            os.getenv("NARUTO_CHATBOT_HOSTED_MODEL", DEFAULT_HOSTED_CHAT_MODEL),
+++            token,
+++        )
+++        return self.primary_chatbot
+++
+++    def _should_try_local_model(self):
+++        if os.getenv("NARUTO_CHATBOT_FORCE_LOCAL_MODEL") == "1":
+++            return True
+++
+++        if os.name == "nt":
+++            return False
+++
+++        try:
+++            import torch
+++
+++            return torch.cuda.is_available()
+++        except Exception:
+++            return False
+++
+++    def _get_local_model_chatbot(self):
+++        if self.local_model_attempted:
+++            return self.local_model_chatbot
+++
+++        self.local_model_attempted = True
+++        if not self._should_try_local_model():
+++            return None
+++
+++        from character_chatbot import CharacterChatBot
+++
+++        self.local_model_chatbot = CharacterChatBot(
+++            DEFAULT_CHATBOT_MODEL,
+++            data_path=str(_resolve_path("data/naruto.csv")),
+++            huggingface_token=os.getenv("huggingface_token"),
+++        )
+++        return self.local_model_chatbot
+++
+++    def _get_demo_chatbot(self):
+++        if self.demo_chatbot is None:
+++            self.demo_chatbot = LocalNarutoDemoChatbot("data/naruto.csv")
+++        return self.demo_chatbot
+++
+++    def chat(self, message, history):
+++        primary_chatbot = self._get_primary_chatbot()
+++        if primary_chatbot is not None:
+++            try:
+++                return primary_chatbot.chat(message, history)
+++            except Exception as exc:
+++                self.primary_chatbot = None
+++                self.primary_disabled = True
+++                self.primary_error = str(exc)
+++
+++        try:
+++            local_model_chatbot = self._get_local_model_chatbot()
+++            if local_model_chatbot is not None:
+++                return local_model_chatbot.chat(message, history)
+++        except Exception as exc:
+++            self.primary_error = str(exc)
+++
+++        return self._get_demo_chatbot().chat(message, history)
+++
+++
+++@lru_cache(maxsize=1)
+++def _get_zero_shot_classifier():
+++    import torch
+++    from transformers import pipeline
+++
+++    device = 0 if torch.cuda.is_available() else -1
+++    return pipeline(
+++        "zero-shot-classification",
+++        model="facebook/bart-large-mnli",
+++        device=device,
+++    )
+++
+++
+++@lru_cache(maxsize=1)
+++def _get_character_chatbot():
+++    return CharacterChatbotFacade()
+++
++ def get_themes(theme_list_str,subtitles_path,save_path):
++-    theme_list = theme_list_str.split(',')
+++    from theme_classifier import ThemeClassifier
+++
+++    theme_list = [theme.strip() for theme in theme_list_str.split(',') if theme.strip()]
++     theme_classifier = ThemeClassifier(theme_list)
++     output_df = theme_classifier.get_themes(subtitles_path,save_path)
++ 
+++    for theme in theme_list:
+++        if theme not in output_df.columns:
+++            output_df[theme] = 0.0
+++
++     # Remove dialogue from the theme list
++     theme_list = [theme for theme in theme_list if theme != 'dialogue']
++     output_df = output_df[theme_list]
++@@ -32,6 +317,8 @@ def get_themes(theme_list_str,subtitles_path,save_path):
++     return output_chart
++ 
++ def get_character_network(subtitles_path,ner_path):
+++    from character_network import NamedEntityRecognizer, CharacterNetworkGenerator
+++
++     ner = NamedEntityRecognizer()
++     ner_df = ner.get_ners(subtitles_path,ner_path)
++ 
++@@ -42,27 +329,41 @@ def get_character_network(subtitles_path,ner_path):
++     return html
++ 
++ def classify_text(text_classifcation_model,text_classifcation_data_path,text_to_classify):
++-    jutsu_classifier = JutsuClassifier(model_path = text_classifcation_model,
++-                                       data_path = text_classifcation_data_path,
++-                                       huggingface_token = os.getenv('huggingface_token'))
++-    
++-    output = jutsu_classifier.classify_jutsu(text_to_classify)
++-    output = output[0]
++-    
++-    return output
+++    if _model_path_exists(text_classifcation_model):
+++        from text_classification import JutsuClassifier
++ 
++-def chat_with_character_chatbot(message, history):
++-    character_chatbot = CharacterChatBot("AbdullahTarek/Naruto_Llama-3-8B",
++-                                         huggingface_token = os.getenv('huggingface_token')
++-                                         )
+++        jutsu_classifier = JutsuClassifier(model_path = text_classifcation_model,
+++                                           data_path = text_classifcation_data_path,
+++                                           huggingface_token = os.getenv('huggingface_token'))
+++        
+++        output = jutsu_classifier.classify_jutsu(text_to_classify)
+++        output = output[0]
+++        return output
+++
+++    zero_shot_classifier = _get_zero_shot_classifier()
+++    output = zero_shot_classifier(
+++        text_to_classify,
+++        JUTSU_LABELS,
+++        multi_label=False,
+++        hypothesis_template="This jutsu belongs to {}.",
+++    )
+++    return f"{output['labels'][0]} (demo fallback, score={output['scores'][0]:.2f})"
++ 
+++def chat_with_character_chatbot(message, history):
+++    character_chatbot = _get_character_chatbot()
++     output = character_chatbot.chat(message, history)
++-    output = output['content'].strip()
++-    return output
+++    if isinstance(output, dict):
+++        return output.get('content', '').strip()
+++    return str(output).strip()
++ 
++ 
++ def main():
++     with gr.Blocks() as iface:
+++        gr.Markdown(
+++            "# Naruto Series Analysis\n"
+++            "This UI starts locally on your machine. The chatbot will use hosted or local Llama inference when available, and automatically fall back to a local demo chatbot when those paths are unavailable."
+++        )
+++
++         # Theme Classification Section
++         with gr.Row():
++             with gr.Column():
++@@ -71,9 +372,9 @@ def main():
++                     with gr.Column():
++                         plot = gr.BarPlot()
++                     with gr.Column():
++-                        theme_list = gr.Textbox(label="Themes")
++-                        subtitles_path = gr.Textbox(label="Subtitles or script Path")
++-                        save_path = gr.Textbox(label="Save Path")
+++                        theme_list = gr.Textbox(label="Themes", value="friendship, rivalry, hard work, dialogue")
+++                        subtitles_path = gr.Textbox(label="Subtitles or script Path", value="data/Subtitles")
+++                        save_path = gr.Textbox(label="Save Path", value="stubs/theme_classifier_output.csv")
++                         get_themes_button =gr.Button("Get Themes")
++                         get_themes_button.click(get_themes, inputs=[theme_list,subtitles_path,save_path], outputs=[plot])
++ 
++@@ -85,8 +386,8 @@ def main():
++                     with gr.Column():
++                         network_html = gr.HTML()
++                     with gr.Column():
++-                        subtitles_path = gr.Textbox(label="Subtutles or Script Path")
++-                        ner_path = gr.Textbox(label="NERs save path")
+++                        subtitles_path = gr.Textbox(label="Subtutles or Script Path", value="data/Subtitles")
+++                        ner_path = gr.Textbox(label="NERs save path", value="stubs/ner_output.csv")
++                         get_network_graph_button = gr.Button("Get Character Network")
++                         get_network_graph_button.click(get_character_network, inputs=[subtitles_path,ner_path], outputs=[network_html])
++ 
++@@ -98,9 +399,9 @@ def main():
++                     with gr.Column():
++                         text_classification_output = gr.Textbox(label="Text Classification Output")
++                     with gr.Column():
++-                        text_classifcation_model = gr.Textbox(label='Model Path')
++-                        text_classifcation_data_path = gr.Textbox(label='Data Path')
++-                        text_to_classify = gr.Textbox(label='Text input')
+++                        text_classifcation_model = gr.Textbox(label='Model Path', value=DEFAULT_TEXT_CLASSIFIER_MODEL)
+++                        text_classifcation_data_path = gr.Textbox(label='Data Path', value='data/jutsus.jsonl')
+++                        text_to_classify = gr.Textbox(label='Text input', value='Shadow Clone Jutsu creates copies of the user to overwhelm the enemy.')
++                         classify_text_button = gr.Button("Clasify Text (Jutsu)")
++                         classify_text_button.click(classify_text, inputs=[text_classifcation_model,text_classifcation_data_path,text_to_classify], outputs=[text_classification_output])
++ 
++@@ -110,7 +411,12 @@ def main():
++                 gr.HTML("<h1>Character Chatbot</h1>")
++                 gr.ChatInterface(chat_with_character_chatbot)
++ 
++-    iface.launch(share=True)
+++    iface.launch(
+++        server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
+++        server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
+++        share=False,
+++        _frontend=False,
+++    )
++             
++ 
++ if __name__ == '__main__':
++diff --git a/requirements.txt b/requirements.txt
++index 0240c38..02d9415 100644
++--- a/requirements.txt
+++++ b/requirements.txt
++@@ -1,10 +1,24 @@
++ transformers==4.44.0
++-huggingface_hub==0.24.5
+++huggingface_hub==0.25.2
+++accelerate==0.33.0
+++datasets==2.21.0
+++evaluate==0.4.2
+++numpy==1.26.4
+++pandas==2.2.2
++ nltk==3.8.1
+++fastapi==0.112.2
++ gradio==4.36.1
+++jinja2==3.1.4
+++networkx==3.3
++ pyvis==0.3.2
++-evaluate==0.4.2
++ python-dotenv==1.0.1
+++scikit-learn==1.5.1
+++spacy==3.7.5
+++starlette==0.37.2
+++torch==2.4.1
+++
+++# Optional feature-specific packages.
+++beautifulsoup4==4.12.3
++ peft==0.14.0
++-trl==0.9.6
++-bitsandbytes==0.43.3
++\ No newline at end of file
+++scrapy==2.11.2
+++trl==0.9.6
++\ No newline at end of file
++diff --git a/run_app.bat b/run_app.bat
++index b89ce85..f0407b5 100644
++--- a/run_app.bat
+++++ b/run_app.bat
++@@ -1,5 +1,9 @@
++ @echo off
++ REM Quick startup script for the Naruto NLP Project
+++setlocal
+++
+++set "VENV_DIR=.venv"
+++set "NEED_INSTALL=0"
++ 
++ echo.
++ echo =====================================================
++@@ -8,16 +12,35 @@ echo =====================================================
++ echo.
++ 
++ REM Check if virtual environment exists
++-if not exist venv (
+++if not exist "%VENV_DIR%\Scripts\python.exe" (
++     echo Creating virtual environment...
++-    python -m venv venv
++-    call venv\Scripts\activate.bat
++-    pip install --upgrade pip
++-    echo Installing dependencies...
++-    pip install -r requirements.txt
+++    py -3.11 -m venv "%VENV_DIR%" 2>nul
+++    if errorlevel 1 (
+++        python -m venv "%VENV_DIR%"
+++    )
+++
+++    call "%VENV_DIR%\Scripts\activate.bat"
+++    set "NEED_INSTALL=1"
++ ) else (
++     echo Activating virtual environment...
++-    call venv\Scripts\activate.bat
+++    call "%VENV_DIR%\Scripts\activate.bat"
+++    python -c "import gradio, transformers, pandas, dotenv" >nul 2>&1
+++    if errorlevel 1 (
+++        set "NEED_INSTALL=1"
+++    )
+++)
+++
+++if "%NEED_INSTALL%"=="1" (
+++    echo Installing dependencies...
+++    pip install --upgrade pip
+++    pip install -r requirements.txt
+++)
+++
+++if not exist .env (
+++    if exist .env_example (
+++        echo Creating .env from template...
+++        copy /Y .env_example .env >nul
+++    )
++ )
++ 
++ echo.
++@@ -25,8 +48,10 @@ echo =====================================================
++ echo    Starting Gradio Application
++ echo =====================================================
++ echo.
++-echo The app will open at: http://localhost:7860
+++echo The app will open at: http://127.0.0.1:7860
++ echo Press Ctrl+C to stop the server
+++echo The chatbot can use hosted or local Llama inference when available.
+++echo If those are unavailable, it will fall back to the local demo chatbot.
++ echo.
++ 
++ python gradio_app.py
++diff --git a/utils/data_loader.py b/utils/data_loader.py
++index 8d8aa8f..ae48b51 100644
++--- a/utils/data_loader.py
+++++ b/utils/data_loader.py
++@@ -1,27 +1,49 @@
++-from glob import glob 
+++from glob import glob
+++import os
+++
++ import pandas as pd
++ 
++-def load_subtitles_dataset(dataset_path):
++-    subtitles_paths = glob(dataset_path+'/*.ass')
++ 
++-    scripts=[]
++-    episode_num=[]
+++def _extract_episode_number(path):
+++    filename = os.path.basename(path)
+++    return int(filename.split('-')[-1].split('.')[0].strip())
++ 
++-    for path in subtitles_paths:
++ 
++-        #Read Lines
++-        with open(path,'r') as file:
++-            lines = file.readlines()
++-            lines = lines[27:]
++-            lines =  [ ",".join(line.split(',')[9:])  for line in lines ]
++-        
++-        lines = [ line.replace('\\N',' ') for line in lines]
++-        script = " ".join(lines)
+++def _load_ass_script(path):
+++    with open(path, 'r', encoding='utf-8', errors='ignore') as file:
+++        lines = file.readlines()[27:]
+++    dialogue_lines = [",".join(line.split(',')[9:]).strip() for line in lines if line.strip()]
+++    return " ".join(line.replace('\\N', ' ') for line in dialogue_lines)
+++
+++
+++def _load_srt_script(path):
+++    with open(path, 'r', encoding='utf-8', errors='ignore') as file:
+++        lines = file.readlines()
+++
+++    dialogue_lines = []
+++    for raw_line in lines:
+++        line = raw_line.strip()
+++        if not line or line.isdigit() or '-->' in line:
+++            continue
+++        dialogue_lines.append(line)
++ 
++-        episode = int(path.split('-')[-1].split('.')[0].strip())
+++    return " ".join(dialogue_lines)
+++
+++
+++def load_subtitles_dataset(dataset_path):
+++    subtitles_paths = sorted(glob(dataset_path + '/*.ass') + glob(dataset_path + '/*.srt'))
+++
+++    scripts = []
+++    episode_num = []
+++
+++    for path in subtitles_paths:
+++        if path.endswith('.ass'):
+++            script = _load_ass_script(path)
+++        else:
+++            script = _load_srt_script(path)
++ 
++         scripts.append(script)
++-        episode_num.append(episode)
+++        episode_num.append(_extract_episode_number(path))
++ 
++-    df = pd.DataFrame.from_dict({"episode":episode_num, "script":scripts })
++-    return df
++\ No newline at end of file
+++    df = pd.DataFrame.from_dict({"episode": episode_num, "script": scripts})
+++    return df.sort_values('episode').reset_index(drop=True)
++\ No newline at end of file
++-- 
++2.51.0.windows.1
++
+diff --git a/0002-Update-readme.patch b/0002-Update-readme.patch
+new file mode 100644
+index 0000000..e081b7b
+--- /dev/null
++++ b/0002-Update-readme.patch
+@@ -0,0 +1,655 @@
++From 0cd17e932180608cb4345e50a7e94720423fa282 Mon Sep 17 00:00:00 2001
++From: Bardawal-Bihari_PWSCLLC <Bardawal.Bihari@powerschool.com>
++Date: Mon, 13 Apr 2026 18:50:44 +0530
++Subject: [PATCH 2/2] Update readme
++
++---
++ INDEX.md          |   4 +
++ PROJECT_STATUS.md |   4 +
++ QUICK_START.md    | 232 ++++++++++++++----------------------
++ README.md         | 298 ++++++++++++++++++++++++++++++++++++++++++++--
++ README_FIXES.md   |   4 +
++ 5 files changed, 386 insertions(+), 156 deletions(-)
++
++diff --git a/INDEX.md b/INDEX.md
++index 20b4b21..2c021c9 100644
++--- a/INDEX.md
+++++ b/INDEX.md
++@@ -1,3 +1,7 @@
+++# Documentation Index
+++
+++README.md is the primary document for the current project overview, setup, run instructions, and interview-facing description. The other files in this folder are supplementary or historical notes.
+++
++ # 📖 DOCUMENTATION INDEX
++ 
++ ## Your Project Has Been Fixed! 🎉
++diff --git a/PROJECT_STATUS.md b/PROJECT_STATUS.md
++index f219f92..c97b855 100644
++--- a/PROJECT_STATUS.md
+++++ b/PROJECT_STATUS.md
++@@ -1,3 +1,7 @@
+++# Historical Status Report
+++
+++This file summarizes an earlier stabilization pass. For the current project scope, supported runtime modes, setup instructions, and accurate feature status, use README.md as the source of truth.
+++
++ # 🎉 PROJECT FIX COMPLETE - STATUS REPORT
++ 
++ ## Summary
++diff --git a/QUICK_START.md b/QUICK_START.md
++index 847bf0a..80aee38 100644
++--- a/QUICK_START.md
+++++ b/QUICK_START.md
++@@ -1,196 +1,142 @@
++-# AI Series Analysis NLP LLMs - FIXED ✓
+++# Quick Start
++ 
++-## Quick Start
+++Use this file when you want the shortest path to running the project locally. The full project explanation, architecture, dataset notes, and interview-ready positioning are documented in README.md.
++ 
++-Your project has been fixed and is ready to run! Here's what was done:
+++## What You Get
++ 
++-### Changes Made
+++This repository is an end-to-end NLP portfolio project built around Naruto data. It includes:
++ 
++-#### 🐛 Bug Fixes
++-1. **character_chatbot.py** - Fixed 3 typos
++-   - `toknizer` → `tokenizer` (lines 103, 106, 150)
++-   - Would cause crashes when training models
+++- Theme extraction from episode subtitles using zero-shot classification
+++- Character relationship graph generation using named entity recognition and NetworkX
+++- Jutsu text classification with a trainable transformer pipeline and a zero-shot fallback in the UI
+++- A Naruto chatbot with hosted, local-model, and local retrieval-based runtime paths
+++- A Gradio interface that ties all features together in one local application
++ 
++-2. **named_entity_recognizer.py** - Fixed path resolution
++-   - `pathlib.Path().parent.resolve()` → `pathlib.Path(__file__).parent.resolve()`
++-   - Would break relative module imports
+++## Recommended Environment
++ 
++-#### ⚙️ Configuration Updates
++-3. **requirements.txt** - Fixed installation issues
++-   - Changed `git+https://github.com/huggingface/peft.git` to `peft==0.14.0`
++-   - Prevents git clone failures
+++- Python 3.11
+++- 8 GB RAM minimum, 16 GB recommended
+++- Windows, macOS, or Linux
+++- Optional Hugging Face token for hosted or gated model access
++ 
++-4. **.env** - Created configuration file
++-   - Ready for HuggingFace token (get from https://huggingface.co/settings/tokens)
+++## Setup
++ 
++-### Installation
+++### Windows PowerShell
++ 
++-```bash
++-# Install dependencies
+++```powershell
+++cd AI_Series_analysis_NLP_LLMS
+++py -3.11 -m venv .venv
+++.\.venv\Scripts\Activate.ps1
+++python -m pip install --upgrade pip
++ pip install -r requirements.txt
++-
++-# Or with conda
++-conda install -c conda-forge -r requirements.txt
+++Copy-Item .env_example .env -ErrorAction SilentlyContinue
++ ```
++ 
++-### Configuration
+++### Windows Git Bash
++ 
++-Edit `.env` file and add your HuggingFace token:
++-```
++-huggingface_token=hf_YOUR_TOKEN_HERE
+++```bash
+++cd AI_Series_analysis_NLP_LLMS
+++py -3.11 -m venv .venv
+++source .venv/Scripts/activate
+++python -m pip install --upgrade pip
+++pip install -r requirements.txt
+++cp -n .env_example .env
++ ```
++ 
++-### Run the App
+++### macOS or Linux
++ 
++ ```bash
++-# Option 1: Direct run
++-python gradio_app.py
+++cd AI_Series_analysis_NLP_LLMS
+++python3.11 -m venv .venv
+++source .venv/bin/activate
+++python -m pip install --upgrade pip
+++pip install -r requirements.txt
+++cp -n .env_example .env
+++```
++ 
++-# Option 2: Use batch script (Windows)
++-run_app.bat
+++## Optional Configuration
++ 
++-# Option 3: From Python
++-python -c "from gradio_app import main; main()"
+++Add a Hugging Face token to .env if you want access to hosted or gated model paths:
+++
+++```env
+++huggingface_token=hf_your_token_here
++ ```
++ 
++-The app will be available at: **http://localhost:7860**
+++If you do not add a token, the app still runs locally. The chatbot will use the built-in local fallback instead of hosted inference.
++ 
++-## Project Structure
+++## Optional NLP Model Downloads
++ 
++-```
++-├── gradio_app.py                    # Main web interface
++-├── .env                             # Configuration (HF token)
++-├── requirements.txt                 # Dependencies
++-│
++-├── character_chatbot/               # Chatbot with LLMs
++-│   ├── character_chatbot.py        # ✓ FIXED
++-│   ├── character_chatbot_development.ipynb
++-│   └── __init__.py
++-│
++-├── character_network/               # Character relationship graphs
++-│   ├── character_netowork_generator.py
++-│   ├── named_entity_recognizer.py  # ✓ FIXED
++-│   ├── character_network_generator.ipynb
++-│   └── __init__.py
++-│
++-├── text_classification/             # Custom text classifier
++-│   ├── jutsu_classifier.py
++-│   ├── cleaner.py
++-│   ├── training_utils.py
++-│   ├── custom_trainer.py
++-│   ├── jutsu_classfier_development.ipynb
++-│   └── __init__.py
++-│
++-├── theme_classifier/                # Zero-shot theme classification
++-│   ├── theme_classifier.py
++-│   ├── theme_classification_development.ipynb
++-│   └── __init__.py
++-│
++-├── utils/                           # Shared utilities
++-│   ├── data_loader.py
++-│   └── __init__.py
++-│
++-├── crawler/                         # Web scraping (optional)
++-│   └── jutsu_crawler.py
++-│
++-├── data/                            # Data files
++-│   ├── naruto.csv
++-│   ├── jutsus.jsonl
++-│   └── Subtitles/
++-│
++-└── README.md                        # Original documentation
+++The character network feature can use cached NER output from stubs/ner_output.csv. If you want to regenerate NER from scratch, install a spaCy English model:
+++
+++```bash
+++python -m spacy download en_core_web_sm
++ ```
++ 
++-## Features
+++The theme classifier uses NLTK sentence tokenization. NLTK resources are downloaded automatically the first time the feature runs.
++ 
++-### 1. Theme Classification
++-Extract main themes from series using zero-shot classifiers
+++## Run
++ 
++-### 2. Character Network
++-Create interactive network graphs of character relationships using NER
+++### Cross-platform
++ 
++-### 3. Text Classification
++-Train custom LLM models to classify text (e.g., Jutsu types)
+++```bash
+++python gradio_app.py
+++```
++ 
++-### 4. Character Chatbot
++-Chat with fine-tuned LLaMA 3 model acting as a series character
+++### Windows launcher
++ 
++-### 5. Data Crawler
++-Scrape web data to build custom datasets
+++```bat
+++run_app.bat
+++```
++ 
++-## System Requirements
+++Open the app at http://127.0.0.1:7860
++ 
++-- **Python**: 3.8+
++-- **Memory**: 16GB RAM (8GB minimum)
++-- **Disk**: 50GB+ (for models and data)
++-- **GPU**: Optional (CUDA-compatible for faster processing)
+++## Runtime Behavior
++ 
++-## Dependencies
+++- Theme classification works locally from subtitle files or the cached CSV output
+++- Character network works from cached NER output immediately, or from fresh spaCy inference if a model is installed
+++- Text classification uses a trained model only if you supply a valid model path or Hugging Face repo; otherwise the UI falls back to zero-shot classification across Ninjutsu, Genjutsu, and Taijutsu
+++- Chatbot tries hosted inference first when a valid token is available, then attempts a local model path when suitable, and finally falls back to a local Naruto dialogue-based chatbot so the interface remains usable
++ 
++-Main packages:
++-- `transformers` - Hugging Face models
++-- `gradio` - Web interface
++-- `torch` - Deep learning
++-- `peft` - LoRA fine-tuning
++-- `spacy` - NER and NLP
++-- `nltk` - Text processing
++-- `pyvis` - Network visualization
++-- `scikit-learn` - ML utilities
++-- `datasets` - Dataset handling
++-- `bitsandbytes` - Model quantization
+++## Quick Validation
++ 
++-## Troubleshooting
+++After setup, these checks should pass:
++ 
++-### Issue: ModuleNotFoundError
++-**Solution**: Ensure all dependencies are installed:
++ ```bash
++-pip install -r requirements.txt --upgrade
+++python test_imports.py
+++python gradio_app.py
++ ```
++ 
++-### Issue: HuggingFace token error
++-**Solution**: Add token to `.env`:
+++## Troubleshooting
+++
+++### Imports fail after installation
+++
++ ```bash
++-echo "huggingface_token=hf_YOUR_TOKEN" > .env
+++python -m pip install --upgrade pip
+++pip install -r requirements.txt --upgrade
++ ```
++ 
++-### Issue: Out of memory
++-**Solution**: Use CPU mode or reduce batch sizes in model code
+++### spaCy model missing
++ 
++-### Issue: Spacy model not found
++-**Solution**: Download the model:
++ ```bash
++-python -m spacy download en_core_web_trf
++-# Or lighter version:
++ python -m spacy download en_core_web_sm
++ ```
++ 
++-## Files Modified
++-
++-✅ `character_chatbot/character_chatbot.py` - Fixed tokenizer typo
++-✅ `character_network/named_entity_recognizer.py` - Fixed path resolution  
++-✅ `requirements.txt` - Fixed peft dependency
++-✅ Created `.env` - Configuration file
++-✅ Created test_imports.py - Validation script
++-✅ Created FIX_SUMMARY.md - Detailed changes
++-✅ Created run_app.bat - Windows launcher
+++### Hugging Face access errors
++ 
++-## Next Steps
+++Confirm that your token is valid and has permission for the model or provider you want to use. The rest of the app can still run without that access.
++ 
++-1. ✓ Install dependencies: `pip install -r requirements.txt`
++-2. ✓ Configure HuggingFace token in `.env`
++-3. ✓ Download Spacy models: `python -m spacy download en_core_web_trf`
++-4. ✓ Run the app: `python gradio_app.py`
++-5. ✓ Open browser: `http://localhost:7860`
+++### Port 7860 is already in use
++ 
++-## Support
+++Set a different port before launch:
++ 
++-- **HuggingFace Docs**: https://huggingface.co/docs
++-- **Gradio Docs**: https://www.gradio.app/docs/
++-- **Spacy Docs**: https://spacy.io/
++-- **PyTorch Docs**: https://pytorch.org/docs
+++```bash
+++set GRADIO_SERVER_PORT=7861
+++python gradio_app.py
+++```
++ 
++----
+++On macOS or Linux:
++ 
++-**Status**: ✅ READY TO RUN  
++-**Last Updated**: 2026-02-03  
++-**All Critical Issues Fixed**: YES
+++```bash
+++export GRADIO_SERVER_PORT=7861
+++python gradio_app.py
+++```
++diff --git a/README.md b/README.md
++index 502cad3..32ad824 100644
++--- a/README.md
+++++ b/README.md
++@@ -1,21 +1,293 @@
++-# Analyze your favourite Series with NLP
++-In this project we are going to analyze a series with NLP and LLMs. We are going to scrape our own dataset, use zero shot classifiers, build our own LLM text classifier, use NER to build a character network and build a charatecter chatbot to chat with your favorite characters. And in the end we are going to put all that in web GUI with Gradio. This NLP project will take your CV to another level. You will learn a lot of NLP skills that is used in the market.
+++# Naruto Series Analysis with NLP and LLMs
++ 
++-## Overview
++-In this project, we have created 5 models, each containing the code for a different part of the project:
++-      
++-**crawler**: This folder contains the code for web scraping the internet to build a comprehensive dataset about the anime using Scrapy.
+++This repository is more than a UI mockup. It is a real end-to-end applied NLP project built around Naruto data, with data collection, preprocessing, model-driven analysis, graph generation, text classification, and conversational interaction exposed through a Gradio application.
++ 
++-**character_network**: This folder contains the code for creating an intricate character network using Spacy's NER model, NetworkX, and PyViz.
+++The project is suitable for interview discussion and resume use because it demonstrates a complete workflow: dataset creation, NLP feature engineering, zero-shot inference, trainable transformer components, visualization, and application-layer integration.
++ 
++-**text_classifier**: This folder contains the code for training a text classifier that can classify text into multiple classes.
+++## Why This Is a Real Project
++ 
++-**theme_classifier**: This folder contains the code for extracting the main themes of the series using Zero-shot classifiers.
+++This codebase contains working implementations for multiple NLP tasks:
++ 
++-**charater_chat_bot**: This folder contains the code for building a charatcer chatbot with LLMs to chat with your favorite charaters from the series. 
+++- Subtitle ingestion from episode files in .ass and .srt formats
+++- Theme extraction using Hugging Face zero-shot classification
+++- Character relationship mining using sentence-level named entity recognition
+++- Interactive network graph visualization with NetworkX and PyVis
+++- Jutsu classification using a trainable transformer-based text classification pipeline
+++- A multi-path Naruto chatbot interface with hosted inference, local-model support, and a local retrieval-style fallback
+++- A Gradio application that unifies all features into one local product
++ 
+++It is best described as a portfolio-grade NLP application. It is not a production SaaS system, but it is also not just a static demo. The analytics pipeline is real, the data files are real, and the UI executes actual model-backed or retrieval-backed workflows.
++ 
++-## Requirements
++-Before running the code in this project, make sure you have installed all packages in the requirements.txt by running
+++## What The App Does
++ 
++-```pip install -r requirements.txt```
++\ No newline at end of file
+++### 1. Theme Classification
+++
+++The app reads subtitle scripts, splits them into sentence batches, and scores custom themes such as friendship, rivalry, and hard work using facebook/bart-large-mnli.
+++
+++### 2. Character Network Analysis
+++
+++The app extracts person entities from subtitle data, builds co-occurrence relationships across sentence windows, and renders an interactive character graph.
+++
+++### 3. Jutsu Text Classification
+++
+++The repository includes a transformer training pipeline for classifying jutsu descriptions into coarse labels such as Ninjutsu, Genjutsu, and Taijutsu. In the UI, if no trained model is supplied, the app falls back to zero-shot classification so the feature still works locally.
+++
+++### 4. Naruto Character Chatbot
+++
+++The chatbot is designed with layered runtime behavior:
+++
+++- Hosted inference when a compatible Hugging Face token and model access are available
+++- Local model path when a suitable environment exists
+++- Local Naruto dialogue fallback when heavyweight inference paths are unavailable
+++
+++That fallback design keeps the chatbot usable for local presentations while preserving the more advanced model paths for stronger environments.
+++
+++### 5. Data Collection and Reuse
+++
+++The repository also includes a crawler module and cached outputs in stubs/ so expensive NLP steps do not need to be recomputed every time.
+++
+++## Project Structure
+++
+++```text
+++AI_Series_analysis_NLP_LLMS/
+++├── gradio_app.py                  # Main Gradio application and feature orchestration
+++├── requirements.txt               # Python dependencies
+++├── run_app.bat                    # Windows helper script
+++├── .env_example                   # Environment variable template
+++├── data/
+++│   ├── naruto.csv                 # Naruto dialogue data used by chatbot fallback
+++│   ├── jutsus.jsonl               # Jutsu dataset for text classification
+++│   └── Subtitles/                 # Episode subtitle files (.ass and .srt)
+++├── stubs/
+++│   ├── ner_output.csv             # Cached named entity output
+++│   └── theme_classifier_output.csv # Cached theme scoring output
+++├── crawler/
+++│   └── jutsu_crawler.py           # Data collection script
+++├── character_chatbot/
+++│   └── character_chatbot.py       # Local LLM chatbot path
+++├── character_network/
+++│   ├── named_entity_recognizer.py
+++│   └── character_netowork_generator.py
+++├── text_classification/
+++│   └── jutsu_classifier.py
+++├── theme_classifier/
+++│   └── theme_classifier.py
+++└── utils/
+++    └── data_loader.py
+++```
+++
+++## Technical Workflow
+++
+++### Data Layer
+++
+++- Subtitle files are loaded from data/Subtitles
+++- Dialogue and metadata are transformed into analysis-ready text
+++- Cached outputs in stubs/ allow repeated runs without full recomputation
+++
+++### NLP Layer
+++
+++- Zero-shot classification is used for theme extraction and UI fallback classification
+++- spaCy-based named entity recognition drives character network construction
+++- Transformer-based text classification supports trainable jutsu labeling
+++- Chatbot routing selects the best available inference path at runtime
+++
+++### Application Layer
+++
+++- Gradio provides a single interface for all workflows
+++- The UI is intentionally local-first so it can run on a laptop during interviews or demos
+++- Environment-sensitive fallbacks reduce failures when tokens, GPU support, or gated model access are unavailable
+++
+++## Dataset Snapshot
+++
+++The repository already includes enough data to showcase real NLP workflows:
+++
+++- Episode subtitle corpus in data/Subtitles
+++- Naruto dialogue dataset in data/naruto.csv
+++- Jutsu dataset in data/jutsus.jsonl
+++- Cached analytics outputs in stubs/
+++
+++This is sufficient for a strong showcase of applied NLP pipelines, even though it is not large enough to claim a deeply specialized production conversational model.
+++
+++## Setup
+++
+++Python 3.11 is the recommended version for the current dependency set.
+++
+++### Windows PowerShell
+++
+++```powershell
+++cd AI_Series_analysis_NLP_LLMS
+++py -3.11 -m venv .venv
+++.\.venv\Scripts\Activate.ps1
+++python -m pip install --upgrade pip
+++pip install -r requirements.txt
+++Copy-Item .env_example .env -ErrorAction SilentlyContinue
+++```
+++
+++### Windows Git Bash
+++
+++```bash
+++cd AI_Series_analysis_NLP_LLMS
+++py -3.11 -m venv .venv
+++source .venv/Scripts/activate
+++python -m pip install --upgrade pip
+++pip install -r requirements.txt
+++cp -n .env_example .env
+++```
+++
+++### macOS or Linux
+++
+++```bash
+++cd AI_Series_analysis_NLP_LLMS
+++python3.11 -m venv .venv
+++source .venv/bin/activate
+++python -m pip install --upgrade pip
+++pip install -r requirements.txt
+++cp -n .env_example .env
+++```
+++
+++## Environment Variables
+++
+++Add a Hugging Face token to .env if you want hosted or gated model access:
+++
+++```env
+++huggingface_token=hf_your_token_here
+++```
+++
+++This token is optional for general local use. The project will still run without it, and the chatbot will fall back to the local Naruto dialogue mode.
+++
+++## Optional Downloads
+++
+++### spaCy English Model
+++
+++If you want to regenerate NER results instead of using the cached output, install one of the supported spaCy models:
+++
+++```bash
+++python -m spacy download en_core_web_sm
+++```
+++
+++The code will attempt en_core_web_trf first and then en_core_web_sm.
+++
+++### NLTK Resources
+++
+++The theme classification module downloads required tokenizer resources automatically on first use.
+++
+++## Run The App
+++
+++### Main command
+++
+++```bash
+++python gradio_app.py
+++```
+++
+++### Windows helper script
+++
+++```bat
+++run_app.bat
+++```
+++
+++The app launches locally at http://127.0.0.1:7860 by default.
+++
+++If port 7860 is busy, change the port before launching.
+++
+++### Windows Command Prompt
+++
+++```bat
+++set GRADIO_SERVER_PORT=7861
+++python gradio_app.py
+++```
+++
+++### PowerShell
+++
+++```powershell
+++$env:GRADIO_SERVER_PORT=7861
+++python gradio_app.py
+++```
+++
+++### macOS or Linux
+++
+++```bash
+++export GRADIO_SERVER_PORT=7861
+++python gradio_app.py
+++```
+++
+++## Feature Availability Matrix
+++
+++| Feature | Works locally by default | Extra requirements |
+++|---|---|---|
+++| Theme classification | Yes | None beyond requirements.txt |
+++| Character network from cached NER | Yes | None |
+++| Character network from fresh NER | Yes | spaCy English model |
+++| Jutsu classification | Yes | Trained model path for transformer mode, otherwise zero-shot fallback |
+++| Chatbot | Yes | Token/model access only needed for hosted or gated model paths |
+++| Crawler | Yes | Network access and target site availability |
+++
+++## How To Present This In An Interview
+++
+++You can accurately describe the project as:
+++
+++- An end-to-end NLP application built around anime subtitle and metadata analysis
+++- A project that combines zero-shot inference, named entity recognition, network analysis, text classification, and conversational AI in one interface
+++- A local-first Gradio product designed to remain usable even when heavyweight hosted inference is unavailable
+++- A system that balances real model-backed processing with fallback design for reliable demonstrations
+++
+++Good technical talking points include:
+++
+++- Designing cache-aware NLP pipelines to avoid repeated expensive inference
+++- Using fallback strategies to keep features operational across different machines
+++- Separating data ingestion, model logic, and UI orchestration into modules
+++- Working with real tradeoffs between local inference, hosted inference, and constrained hardware
+++
+++## Validation
+++
+++Use these commands after setup:
+++
+++```bash
+++python test_imports.py
+++python gradio_app.py
+++```
+++
+++If the app starts and the four interface sections render, the project is ready for local showcase.
+++
+++## Troubleshooting
+++
+++### Missing packages after installation
+++
+++```bash
+++python -m pip install --upgrade pip
+++pip install -r requirements.txt --upgrade
+++```
+++
+++### spaCy model not found
+++
+++```bash
+++python -m spacy download en_core_web_sm
+++```
+++
+++### Hugging Face hosted inference fails
+++
+++This usually means the token is missing, invalid, or does not have access to the required model or provider. The local fallback chatbot should still work.
+++
+++### Local LLM path is not available on Windows
+++
+++That is expected on many Windows laptops without a compatible GPU or quantization stack. Use the hosted path when available, otherwise use the built-in chatbot fallback for local showcase.
+++
+++### Feature feels slow on first run
+++
+++The first execution can download models and tokenizer resources. Later runs are faster because models and cached outputs are reused.
+++
+++## Key Dependencies
+++
+++- gradio
+++- transformers
+++- torch
+++- spacy
+++- pandas
+++- scikit-learn
+++- networkx
+++- pyvis
+++- python-dotenv
+++- datasets
+++
+++## Resume-Safe Summary
+++
+++Built a local-first NLP application for anime content analysis using Gradio, Hugging Face transformers, spaCy, NetworkX, and PyVis. Implemented subtitle ingestion, zero-shot theme extraction, named-entity-based character network generation, transformer-driven jutsu classification, and a multi-path Naruto chatbot with hosted and local fallback inference strategies.
++\ No newline at end of file
++diff --git a/README_FIXES.md b/README_FIXES.md
++index ee07b51..fe7bfca 100644
++--- a/README_FIXES.md
+++++ b/README_FIXES.md
++@@ -1,3 +1,7 @@
+++# Historical Fix Notes
+++
+++This file is a historical record of earlier repair work. For the current project description, setup steps, runtime behavior, and interview-ready summary, use README.md as the source of truth.
+++
++ # 🎊 PROJECT RECOVERY COMPLETE
++ 
++ ## Overview
++-- 
++2.51.0.windows.1
++
+diff --git a/INDEX.md b/INDEX.md
+index 2c021c9..a9cf07d 100644
+--- a/INDEX.md
++++ b/INDEX.md
+@@ -1,123 +1,9 @@
+-# Documentation Index
++# Documentation
+ 
+-README.md is the primary document for the current project overview, setup, run instructions, and interview-facing description. The other files in this folder are supplementary or historical notes.
+-
+-# 📖 DOCUMENTATION INDEX
+-
+-## Your Project Has Been Fixed! 🎉
+-
+-All critical issues have been identified and resolved. Your project is now ready to launch.
+-
+----
+-
+-## 📚 Documentation Files (Read in This Order)
+-
+-### 1. **START HERE** → README_FIXES.md
+-   - Quick overview of all fixes
+-   - 3-step quick start guide
+-   - FAQ and troubleshooting
+-   - **Read this first!**
+-
+-### 2. **Getting Started** → QUICK_START.md
+-   - Detailed setup instructions
+-   - Feature descriptions
+-   - Common issues & solutions
+-   - System requirements
+-
+-### 3. **Technical Details** → FIX_SUMMARY.md
+-   - Line-by-line code changes
+-   - Before/after comparisons
+-   - Impact analysis
+-   - Installation guidance
+-
+-### 4. **Change History** → CHANGES.log
+-   - Complete list of all changes
+-   - File modification records
+-   - Validation results
+-   - Statistics
+-
+-### 5. **Project Status** → PROJECT_STATUS.md
+-   - Comprehensive status report
+-   - Quality assurance results
+-   - Deployment readiness
+-   - Resource requirements
+-
+----
+-
+-## 🔧 Utility Scripts
+-
+-### test_imports.py
+-Validates that all modules can be imported:
+-```bash
+-python test_imports.py
+-```
+-
+-### run_app.bat
+-Windows batch script to launch the app:
+-```bash
+-run_app.bat
+-```
+-
+-### SETUP_COMPLETE.py
+-Displays setup information and next steps:
+-```bash
+-python SETUP_COMPLETE.py
+-```
+-
+----
+-
+-## ✅ What Was Fixed
+-
+-| # | Issue | Location | Fix | Status |
+-|---|-------|----------|-----|--------|
+-| 1 | Tokenizer typo | character_chatbot.py:103,106,150 | toknizer→tokenizer | ✅ |
+-| 2 | Path resolution | named_entity_recognizer.py:8 | Add __file__ param | ✅ |
+-| 3 | Git dependency | requirements.txt:8 | Use peft==0.14.0 | ✅ |
+-| 4 | Missing config | (none) | Create .env file | ✅ |
+-
+----
+-
+-## 🚀 Quick Launch
+-
+-```bash
+-# Step 1: Install dependencies
+-pip install -r requirements.txt
+-
+-# Step 2: Configure (add your token)
+-# Edit .env and add: huggingface_token=hf_YOUR_TOKEN
+-
+-# Step 3: Run the app
+-python gradio_app.py
+-
+-# Step 4: Open in browser
+-# http://localhost:7860
+-```
+-
+----
+-
+-## 📂 Project Files
+-
+-### Fixed Files
+-- ✅ character_chatbot/character_chatbot.py
+-- ✅ character_network/named_entity_recognizer.py
+-- ✅ requirements.txt
+-
+-### New Files (Documentation & Tools)
+-- 📄 README_FIXES.md (overview)
+-- 📄 QUICK_START.md (guide)
+-- 📄 FIX_SUMMARY.md (technical)
+-- 📄 PROJECT_STATUS.md (status)
+-- 📄 CHANGES.log (history)
+-- 🐍 test_imports.py (validator)
+-- 🐍 SETUP_COMPLETE.py (info)
+-- 🔧 run_app.bat (launcher)
+-
+-### Core Project Files
+-- gradio_app.py (main app)
+-- .env (configuration)
+-- README.md (original docs)
+-- data/ (datasets)
+-- character_chatbot/ (module)
++- README.md: project overview, setup, run, and troubleshooting
++- QUICK_START.md: short setup and run guide
++- PROJECT_STATUS.md: short status note
++- README_FIXES.md: older notes kept for reference
+ - character_network/ (module)
+ - text_classification/ (module)
+ - theme_classifier/ (module)
+diff --git a/PROJECT_STATUS.md b/PROJECT_STATUS.md
+index c97b855..8f120d3 100644
+--- a/PROJECT_STATUS.md
++++ b/PROJECT_STATUS.md
+@@ -1,123 +1,10 @@
+-# Historical Status Report
+-
+-This file summarizes an earlier stabilization pass. For the current project scope, supported runtime modes, setup instructions, and accurate feature status, use README.md as the source of truth.
+-
+-# 🎉 PROJECT FIX COMPLETE - STATUS REPORT
+-
+-## Summary
+-Your AI Series Analysis NLP LLMs project has been successfully fixed and is ready to launch!
+-
+-## ✅ What Was Fixed
+-
+-### 1. Critical Code Bugs (Fixed)
+-
+-#### Bug #1: Tokenizer Typo in character_chatbot.py
+-- **Location**: Lines 103, 106, 150
+-- **Issue**: Variable named `toknizer` instead of `tokenizer`
+-- **Impact**: Would cause NameError when executing the `train()` method
+-- **Fix**: Changed all 3 occurrences to `tokenizer`
+-- **Status**: ✅ FIXED
+-
+-#### Bug #2: Path Resolution Error in named_entity_recognizer.py  
+-- **Location**: Line 8
+-- **Issue**: `pathlib.Path().parent.resolve()` missing `__file__` parameter
+-- **Impact**: Module imports would fail due to incorrect path resolution
+-- **Fix**: Changed to `pathlib.Path(__file__).parent.resolve()`
+-- **Status**: ✅ FIXED
+-
+-### 2. Dependency Issues (Fixed)
+-
+-#### Issue #1: requirements.txt Git Dependency
+-- **Line**: 8
+-- **Problem**: `git+https://github.com/huggingface/peft.git` can fail
+-- **Solution**: Changed to `peft==0.14.0` (PyPI version)
+-- **Status**: ✅ FIXED
+-
+-#### Issue #2: Missing Configuration File
+-- **Missing**: `.env` file
+-- **Solution**: Created `.env` with template from `.env_example`
+-- **Status**: ✅ CREATED
+-
+-### 3. Validation Results
+-
+-All 9 Python modules validated:
+-- ✅ gradio_app.py
+-- ✅ character_chatbot.py (FIXED)
+-- ✅ named_entity_recognizer.py (FIXED)
+-- ✅ character_netowork_generator.py
+-- ✅ jutsu_classifier.py
+-- ✅ cleaner.py
+-- ✅ training_utils.py
+-- ✅ custom_trainer.py
+-- ✅ theme_classifier.py
+-- ✅ data_loader.py
+-
+-**Result**: No syntax errors found
+-
+-## 📊 Files Modified
+-
+-| File | Changes | Status |
+-|------|---------|--------|
+-| character_chatbot/character_chatbot.py | Fixed 3 tokenizer typos | ✅ |
+-| character_network/named_entity_recognizer.py | Fixed path resolution | ✅ |
+-| requirements.txt | Updated peft to PyPI version | ✅ |
+-| .env | Created configuration file | ✅ NEW |
+-| test_imports.py | Created import validator | ✅ NEW |
+-| FIX_SUMMARY.md | Detailed change log | ✅ NEW |
+-| QUICK_START.md | User guide | ✅ NEW |
+-| run_app.bat | Windows launcher script | ✅ NEW |
+-
+-## 🚀 Quick Start Guide
+-
+-### Step 1: Install Dependencies
+-```bash
+-pip install -r requirements.txt
+-```
+-
+-### Step 2: Configure HuggingFace Token
+-Edit `.env` and add:
+-```
+-huggingface_token=hf_YOUR_TOKEN_HERE
+-```
+-
+-Get token from: https://huggingface.co/settings/tokens
+-
+-### Step 3: Run the App
+-```bash
+-python gradio_app.py
+-```
+-
+-The app will launch at: **http://localhost:7860**
+-
+-## 📦 Project Modules
+-
+-| Module | Purpose | Status |
+-|--------|---------|--------|
+-| **Theme Classifier** | Zero-shot classification of anime themes | ✅ Ready |
+-| **Character Network** | Extract and visualize character relationships | ✅ Ready |
+-| **Text Classifier** | Train custom LLM for jutsu classification | ✅ Ready (Fixed) |
+-| **Character Chatbot** | Fine-tuned Llama 3 chatbot | ✅ Ready (Fixed) |
+-| **Crawler** | Web scraping for data collection | ✅ Available |
+-| **Utilities** | Shared data loading functions | ✅ Ready |
+-
+-## 🔧 System Requirements
+-
+-- **Python**: 3.8+
+-- **RAM**: 16GB recommended (8GB minimum)
+-- **Disk**: 50GB+ (for models and data)
+-- **GPU**: Optional (RTX 3060+ recommended for faster processing)
+-
+-## 📋 Dependencies Installed
+-
+-**Core ML Libraries**:
+-- transformers 4.44.0+ - Hugging Face models
+-- torch 1.13.0+ - Deep learning framework
+-- peft 0.14.0+ - LoRA fine-tuning
+-- datasets 4.0+ - Dataset handling
++# Project Status
+ 
+-**NLP Libraries**:
+-- spacy 3.0+ - NER and NLP pipeline
+-- nltk 3.8+ - Text tokenization
++- Main application: gradio_app.py
++- Local data: data/Subtitles, data/naruto.csv, data/jutsus.jsonl, data/naruto_rag_facts.jsonl
++- Cached outputs: stubs/theme_classifier_output.csv, stubs/ner_output.csv
++- Chatbot path: retrieval over local data with optional hosted inference and local fallback
++- Setup instructions: README.md and QUICK_START.md
+ - transformers - Pre-trained models
+ 
+ **Web & Visualization**:
+diff --git a/QUICK_START.md b/QUICK_START.md
+index 80aee38..b2f8bc6 100644
+--- a/QUICK_START.md
++++ b/QUICK_START.md
+@@ -1,17 +1,5 @@
+ # Quick Start
+ 
+-Use this file when you want the shortest path to running the project locally. The full project explanation, architecture, dataset notes, and interview-ready positioning are documented in README.md.
+-
+-## What You Get
+-
+-This repository is an end-to-end NLP portfolio project built around Naruto data. It includes:
+-
+-- Theme extraction from episode subtitles using zero-shot classification
+-- Character relationship graph generation using named entity recognition and NetworkX
+-- Jutsu text classification with a trainable transformer pipeline and a zero-shot fallback in the UI
+-- A Naruto chatbot with hosted, local-model, and local retrieval-based runtime paths
+-- A Gradio interface that ties all features together in one local application
+-
+ ## Recommended Environment
+ 
+ - Python 3.11
+@@ -62,7 +50,7 @@ Add a Hugging Face token to .env if you want access to hosted or gated model pat
+ huggingface_token=hf_your_token_here
+ ```
+ 
+-If you do not add a token, the app still runs locally. The chatbot will use the built-in local fallback instead of hosted inference.
++If you do not add a token, the app still runs locally. The chatbot will answer from the local knowledge base instead of hosted inference.
+ 
+ ## Optional NLP Model Downloads
+ 
+@@ -95,7 +83,7 @@ Open the app at http://127.0.0.1:7860
+ - Theme classification works locally from subtitle files or the cached CSV output
+ - Character network works from cached NER output immediately, or from fresh spaCy inference if a model is installed
+ - Text classification uses a trained model only if you supply a valid model path or Hugging Face repo; otherwise the UI falls back to zero-shot classification across Ninjutsu, Genjutsu, and Taijutsu
+-- Chatbot tries hosted inference first when a valid token is available, then attempts a local model path when suitable, and finally falls back to a local Naruto dialogue-based chatbot so the interface remains usable
++- Chatbot retrieves local context first, then tries hosted inference when a valid token is available, then attempts a local model path when suitable, and finally falls back to grounded local answers
+ 
+ ## Quick Validation
+ 
+diff --git a/README.md b/README.md
+index 32ad824..1bbe6ba 100644
+--- a/README.md
++++ b/README.md
+@@ -1,50 +1,14 @@
+ # Naruto Series Analysis with NLP and LLMs
+ 
+-This repository is more than a UI mockup. It is a real end-to-end applied NLP project built around Naruto data, with data collection, preprocessing, model-driven analysis, graph generation, text classification, and conversational interaction exposed through a Gradio application.
++Naruto Series Analysis is a Gradio-based application for subtitle analysis, character network generation, jutsu classification, and Naruto-focused chat using local project data.
+ 
+-The project is suitable for interview discussion and resume use because it demonstrates a complete workflow: dataset creation, NLP feature engineering, zero-shot inference, trainable transformer components, visualization, and application-layer integration.
++## Features
+ 
+-## Why This Is a Real Project
+-
+-This codebase contains working implementations for multiple NLP tasks:
+-
+-- Subtitle ingestion from episode files in .ass and .srt formats
+-- Theme extraction using Hugging Face zero-shot classification
+-- Character relationship mining using sentence-level named entity recognition
+-- Interactive network graph visualization with NetworkX and PyVis
+-- Jutsu classification using a trainable transformer-based text classification pipeline
+-- A multi-path Naruto chatbot interface with hosted inference, local-model support, and a local retrieval-style fallback
+-- A Gradio application that unifies all features into one local product
+-
+-It is best described as a portfolio-grade NLP application. It is not a production SaaS system, but it is also not just a static demo. The analytics pipeline is real, the data files are real, and the UI executes actual model-backed or retrieval-backed workflows.
+-
+-## What The App Does
+-
+-### 1. Theme Classification
+-
+-The app reads subtitle scripts, splits them into sentence batches, and scores custom themes such as friendship, rivalry, and hard work using facebook/bart-large-mnli.
+-
+-### 2. Character Network Analysis
+-
+-The app extracts person entities from subtitle data, builds co-occurrence relationships across sentence windows, and renders an interactive character graph.
+-
+-### 3. Jutsu Text Classification
+-
+-The repository includes a transformer training pipeline for classifying jutsu descriptions into coarse labels such as Ninjutsu, Genjutsu, and Taijutsu. In the UI, if no trained model is supplied, the app falls back to zero-shot classification so the feature still works locally.
+-
+-### 4. Naruto Character Chatbot
+-
+-The chatbot is designed with layered runtime behavior:
+-
+-- Hosted inference when a compatible Hugging Face token and model access are available
+-- Local model path when a suitable environment exists
+-- Local Naruto dialogue fallback when heavyweight inference paths are unavailable
+-
+-That fallback design keeps the chatbot usable for local presentations while preserving the more advanced model paths for stronger environments.
+-
+-### 5. Data Collection and Reuse
+-
+-The repository also includes a crawler module and cached outputs in stubs/ so expensive NLP steps do not need to be recomputed every time.
++- Theme classification from subtitle files with zero-shot inference
++- Character network generation from named entity extraction and co-occurrence analysis
++- Jutsu text classification with a transformer pipeline and zero-shot fallback
++- Grounded Naruto chatbot using dialogue data, jutsu data, curated facts, and optional hosted inference
++- Cached outputs for repeated runs in stubs/
+ 
+ ## Project Structure
+ 
+@@ -55,7 +19,8 @@ AI_Series_analysis_NLP_LLMS/
+ ├── run_app.bat                    # Windows helper script
+ ├── .env_example                   # Environment variable template
+ ├── data/
+-│   ├── naruto.csv                 # Naruto dialogue data used by chatbot fallback
++│   ├── naruto.csv                 # Dialogue data used by the grounded chatbot
++│   ├── naruto_rag_facts.jsonl     # Curated facts used by chatbot retrieval
+ │   ├── jutsus.jsonl               # Jutsu dataset for text classification
+ │   └── Subtitles/                 # Episode subtitle files (.ass and .srt)
+ ├── stubs/
+@@ -76,41 +41,37 @@ AI_Series_analysis_NLP_LLMS/
+     └── data_loader.py
+ ```
+ 
+-## Technical Workflow
+-
+-### Data Layer
++## Data
+ 
+-- Subtitle files are loaded from data/Subtitles
+-- Dialogue and metadata are transformed into analysis-ready text
+-- Cached outputs in stubs/ allow repeated runs without full recomputation
++- data/Subtitles contains episode subtitle files in .ass and .srt format
++- data/naruto.csv contains dialogue lines used by the chatbot
++- data/jutsus.jsonl contains jutsu names, types, and descriptions
++- data/naruto_rag_facts.jsonl contains short curated facts used by retrieval
++- stubs contains cached outputs for theme classification and NER
+ 
+-### NLP Layer
++## Setup
+ 
+-- Zero-shot classification is used for theme extraction and UI fallback classification
+-- spaCy-based named entity recognition drives character network construction
+-- Transformer-based text classification supports trainable jutsu labeling
+-- Chatbot routing selects the best available inference path at runtime
++Python 3.11 is the recommended version for the current dependency set.
+ 
+-### Application Layer
++## Quick Start
+ 
+-- Gradio provides a single interface for all workflows
+-- The UI is intentionally local-first so it can run on a laptop during interviews or demos
+-- Environment-sensitive fallbacks reduce failures when tokens, GPU support, or gated model access are unavailable
++### Windows
+ 
+-## Dataset Snapshot
++Double-click run_app.bat
+ 
+-The repository already includes enough data to showcase real NLP workflows:
++### Git Bash
+ 
+-- Episode subtitle corpus in data/Subtitles
+-- Naruto dialogue dataset in data/naruto.csv
+-- Jutsu dataset in data/jutsus.jsonl
+-- Cached analytics outputs in stubs/
++```bash
++bash run_app.sh
++```
+ 
+-This is sufficient for a strong showcase of applied NLP pipelines, even though it is not large enough to claim a deeply specialized production conversational model.
++### Direct Python launch
+ 
+-## Setup
++```bash
++./.venv/Scripts/python.exe gradio_app.py
++```
+ 
+-Python 3.11 is the recommended version for the current dependency set.
++The launcher scripts create .venv if needed, install dependencies, verify the core runtime stack, copy .env from .env_example, choose a free port starting from 7860, and start the app.
+ 
+ ### Windows PowerShell
+ 
+@@ -153,7 +114,7 @@ Add a Hugging Face token to .env if you want hosted or gated model access:
+ huggingface_token=hf_your_token_here
+ ```
+ 
+-This token is optional for general local use. The project will still run without it, and the chatbot will fall back to the local Naruto dialogue mode.
++This token is optional. Without it, the chatbot still answers using the local knowledge base and fallback logic.
+ 
+ ## Optional Downloads
+ 
+@@ -176,7 +137,7 @@ The theme classification module downloads required tokenizer resources automatic
+ ### Main command
+ 
+ ```bash
+-python gradio_app.py
++./.venv/Scripts/python.exe gradio_app.py
+ ```
+ 
+ ### Windows helper script
+@@ -185,6 +146,12 @@ python gradio_app.py
+ run_app.bat
+ ```
+ 
++### Git Bash helper script
++
++```bash
++bash run_app.sh
++```
++
+ The app launches locally at http://127.0.0.1:7860 by default.
+ 
+ If port 7860 is busy, change the port before launching.
+@@ -210,32 +177,12 @@ export GRADIO_SERVER_PORT=7861
+ python gradio_app.py
+ ```
+ 
+-## Feature Availability Matrix
+-
+-| Feature | Works locally by default | Extra requirements |
+-|---|---|---|
+-| Theme classification | Yes | None beyond requirements.txt |
+-| Character network from cached NER | Yes | None |
+-| Character network from fresh NER | Yes | spaCy English model |
+-| Jutsu classification | Yes | Trained model path for transformer mode, otherwise zero-shot fallback |
+-| Chatbot | Yes | Token/model access only needed for hosted or gated model paths |
+-| Crawler | Yes | Network access and target site availability |
+-
+-## How To Present This In An Interview
+-
+-You can accurately describe the project as:
++## Runtime Notes
+ 
+-- An end-to-end NLP application built around anime subtitle and metadata analysis
+-- A project that combines zero-shot inference, named entity recognition, network analysis, text classification, and conversational AI in one interface
+-- A local-first Gradio product designed to remain usable even when heavyweight hosted inference is unavailable
+-- A system that balances real model-backed processing with fallback design for reliable demonstrations
+-
+-Good technical talking points include:
+-
+-- Designing cache-aware NLP pipelines to avoid repeated expensive inference
+-- Using fallback strategies to keep features operational across different machines
+-- Separating data ingestion, model logic, and UI orchestration into modules
+-- Working with real tradeoffs between local inference, hosted inference, and constrained hardware
++- Theme classification runs from subtitle files or cached theme output
++- Character network runs from cached NER output or fresh spaCy inference
++- Jutsu classification uses a supplied trained model when available, otherwise zero-shot fallback
++- Chatbot retrieves local context first, then uses hosted or local model inference when available
+ 
+ ## Validation
+ 
+@@ -246,7 +193,7 @@ python test_imports.py
+ python gradio_app.py
+ ```
+ 
+-If the app starts and the four interface sections render, the project is ready for local showcase.
++If the app starts and the interface renders, the setup is working.
+ 
+ ## Troubleshooting
+ 
+@@ -257,6 +204,8 @@ python -m pip install --upgrade pip
+ pip install -r requirements.txt --upgrade
+ ```
+ 
++If Torch or SciPy was partially installed, rerun the launcher script. It now checks the core runtime imports before startup and reinstalls dependencies automatically when the environment is broken.
++
+ ### spaCy model not found
+ 
+ ```bash
+@@ -265,11 +214,11 @@ python -m spacy download en_core_web_sm
+ 
+ ### Hugging Face hosted inference fails
+ 
+-This usually means the token is missing, invalid, or does not have access to the required model or provider. The local fallback chatbot should still work.
++This usually means the token is missing, invalid, or does not have access to the required model or provider. The local chatbot path should still work.
+ 
+ ### Local LLM path is not available on Windows
+ 
+-That is expected on many Windows laptops without a compatible GPU or quantization stack. Use the hosted path when available, otherwise use the built-in chatbot fallback for local showcase.
++That can happen on Windows systems without a compatible GPU or quantization stack. Hosted or grounded local fallback behavior is still available.
+ 
+ ### Feature feels slow on first run
+ 
+@@ -288,6 +237,3 @@ The first execution can download models and tokenizer resources. Later runs are
+ - python-dotenv
+ - datasets
+ 
+-## Resume-Safe Summary
+-
+-Built a local-first NLP application for anime content analysis using Gradio, Hugging Face transformers, spaCy, NetworkX, and PyVis. Implemented subtitle ingestion, zero-shot theme extraction, named-entity-based character network generation, transformer-driven jutsu classification, and a multi-path Naruto chatbot with hosted and local fallback inference strategies.
+\ No newline at end of file
+diff --git a/README_FIXES.md b/README_FIXES.md
+index fe7bfca..3c45ec8 100644
+--- a/README_FIXES.md
++++ b/README_FIXES.md
+@@ -1,123 +1,10 @@
+-# Historical Fix Notes
++# Notes
+ 
+-This file is a historical record of earlier repair work. For the current project description, setup steps, runtime behavior, and interview-ready summary, use README.md as the source of truth.
++This file is kept only for older setup notes.
+ 
+-# 🎊 PROJECT RECOVERY COMPLETE
+-
+-## Overview
+-Your Naruto Series Analysis with NLP & LLMs project has been successfully debugged, fixed, and is now **ready to launch**!
+-
+-## 🔧 What Was Done
+-
+-### Critical Bugs Fixed: 2
+-
+-1. **Character Chatbot - Tokenizer Typo**
+-   - File: `character_chatbot/character_chatbot.py`
+-   - Lines: 103, 106, 150
+-   - Fix: `toknizer` → `tokenizer` (3 fixes)
+-   - Severity: CRITICAL (NameError at runtime)
+-
+-2. **Named Entity Recognizer - Path Resolution**
+-   - File: `character_network/named_entity_recognizer.py`
+-   - Line: 8
+-   - Fix: `pathlib.Path().parent.resolve()` → `pathlib.Path(__file__).parent.resolve()`
+-   - Severity: CRITICAL (ImportError)
+-
+-### Configuration Issues Fixed: 1
+-
+-3. **Requirements Dependency**
+-   - File: `requirements.txt`
+-   - Line: 8
+-   - Fix: `git+https://github.com/huggingface/peft.git` → `peft==0.14.0`
+-   - Reason: Git dependency can fail; PyPI version is reliable
+-
+-### Configuration Files Created: 1
+-
+-4. **.env File**
+-   - Created from `.env_example` template
+-   - Ready for HuggingFace token insertion
+-
+-## 📁 Project Structure
+-
+-```
+-AI_Series_analysis_NLP_LLMS/
+-├── gradio_app.py                 # Main web application
+-├── .env                          # Configuration [CREATED]
+-├── requirements.txt              # Dependencies [FIXED]
+-│
+-├── character_chatbot/            # Chatbot with LLMs [FIXED]
+-│   ├── character_chatbot.py     # Fixed tokenizer typos
+-│   ├── character_chatbot_development.ipynb
+-│   └── __init__.py
+-│
+-├── character_network/            # Character graphs [FIXED]
+-│   ├── character_netowork_generator.py
+-│   ├── named_entity_recognizer.py # Fixed path resolution
+-│   ├── character_network_generator.ipynb
+-│   └── __init__.py
+-│
+-├── text_classification/          # Custom classifier [OK]
+-│   ├── jutsu_classifier.py
+-│   ├── cleaner.py
+-│   ├── training_utils.py
+-│   ├── custom_trainer.py
+-│   ├── jutsu_classfier_development.ipynb
+-│   └── __init__.py
+-│
+-├── theme_classifier/             # Zero-shot themes [OK]
+-│   ├── theme_classifier.py
+-│   ├── theme_classification_development.ipynb
+-│   └── __init__.py
+-│
+-├── utils/                        # Utilities [OK]
+-│   ├── data_loader.py
+-│   └── __init__.py
+-│
+-├── crawler/                      # Web scraping [OK]
+-│   └── jutsu_crawler.py
+-│
+-├── data/                         # Dataset files
+-│   ├── naruto.csv
+-│   ├── jutsus.jsonl
+-│   ├── download_link.txt
+-│   └── Subtitles/               # .ass/.srt files
+-│
+-├── Documentation [NEW]:
+-│   ├── PROJECT_STATUS.md        # This status report
+-│   ├── QUICK_START.md           # Getting started guide
+-│   ├── FIX_SUMMARY.md           # Technical changes
+-│   ├── CHANGES.log              # Change history
+-│   ├── SETUP_COMPLETE.py        # Setup info script
+-│   └── test_imports.py          # Import validator
+-│
+-├── run_app.bat                  # Windows launcher [NEW]
+-├── README.md                    # Original docs
+-└── .env_example                 # Config template
+-```
+-
+-## ✅ Quality Assurance Results
+-
+-| Check | Result | Notes |
+-|-------|--------|-------|
+-| Syntax Validation | ✅ PASS | 0 errors in 10 modules |
+-| Import Testing | ✅ READY | All imports valid |
+-| Code Structure | ✅ VALID | No circular imports |
+-| Type Safety | ✅ OK | No obvious type errors |
+-| Dependencies | ✅ OK | All pinned versions |
+-| Configuration | ✅ OK | .env template ready |
+-
+-## 🚀 Getting Started (3 Steps)
+-
+-### Step 1: Install Dependencies
+-```bash
+-cd c:\Users\bardawal_bihari\My_Projects\AI_Series_analysis_NLP_LLMS
+-pip install -r requirements.txt
+-```
+-
+-### Step 2: Add HuggingFace Token
+-Edit `.env` file:
+-```
+-huggingface_token=hf_YOUR_TOKEN
++- Current setup and run steps are in README.md and QUICK_START.md
++- The active Gradio entry point is gradio_app.py
++- The current chatbot path uses local retrieval plus optional hosted inference
+ ```
+ Get token: https://huggingface.co/settings/tokens
+ 
+diff --git a/character_chatbot/__init__.py b/character_chatbot/__init__.py
+index efd8302..afbdde0 100644
+--- a/character_chatbot/__init__.py
++++ b/character_chatbot/__init__.py
+@@ -1 +1,11 @@
+-from .character_chatbot import CharacterChatBot
+\ No newline at end of file
++from .rag_chatbot import GroundedNarutoRAGChatbot
++
++__all__ = ["CharacterChatBot", "GroundedNarutoRAGChatbot"]
++
++
++def __getattr__(name):
++	if name == "CharacterChatBot":
++		from .character_chatbot import CharacterChatBot
++
++		return CharacterChatBot
++	raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+\ No newline at end of file
+diff --git a/character_chatbot/rag_chatbot.py b/character_chatbot/rag_chatbot.py
+new file mode 100644
+index 0000000..11fddc6
+--- /dev/null
++++ b/character_chatbot/rag_chatbot.py
+@@ -0,0 +1,443 @@
++import json
++import re
++from dataclasses import dataclass
++from difflib import SequenceMatcher
++from pathlib import Path
++
++import pandas as pd
++
++
++def _clean_text(text):
++    cleaned = re.sub(r"\(.*?\)", " ", str(text))
++    cleaned = re.sub(r"\s+", " ", cleaned)
++    return cleaned.strip()
++
++
++def _normalize_text(text):
++    return re.sub(r"[^a-z0-9 ]+", " ", _clean_text(text).lower()).strip()
++
++
++def _extract_introduced_name(text):
++    normalized = _normalize_text(text)
++    match = re.fullmatch(
++        r"(?:hi|hello|hey)?\s*(?:i am|i m|my name is|call me)\s+([a-z][a-z\-']*(?:\s+[a-z][a-z\-']*){0,2})",
++        normalized,
++    )
++    if not match:
++        return None
++    raw_name = match.group(1).strip()
++    return " ".join(part.capitalize() for part in raw_name.split())
++
++
++def _contains_phrase(text, phrases):
++    return any(re.search(rf"\b{re.escape(phrase)}\b", text) for phrase in phrases)
++
++
++def _contains_greeting(text):
++    return bool(re.search(r"\b(?:h+i+|h+e+y+|hello+|yo+)\b", text))
++
++
++def _has_similar_token(text, targets, cutoff=0.72):
++    tokens = text.split()
++    for token in tokens:
++        for target in targets:
++            if SequenceMatcher(None, token, target).ratio() >= cutoff:
++                return True
++    return False
++
++
++def _truncate(text, max_chars=280):
++    if len(text) <= max_chars:
++        return text
++    return text[: max_chars - 3].rstrip() + "..."
++
++
++@dataclass
++class KnowledgeChunk:
++    source_type: str
++    title: str
++    text: str
++
++    def prompt_text(self):
++        return f"[{self.source_type}] {self.title}: {self.text}"
++
++    def source_label(self):
++        return f"{self.source_type}: {self.title}"
++
++
++class NarutoKnowledgeBase:
++    def __init__(self, repo_root, transcript_path, jutsu_path, facts_path):
++        from sklearn.feature_extraction.text import TfidfVectorizer
++
++        self.repo_root = Path(repo_root)
++        self.transcript_path = self.repo_root / transcript_path
++        self.jutsu_path = self.repo_root / jutsu_path
++        self.facts_path = self.repo_root / facts_path
++        self.chunks = self._load_chunks()
++        self.identity_chunks = [
++            chunk for chunk in self.chunks if chunk.source_type in {"character", "location", "concept", "team", "motivation", "jutsu_fact"}
++        ]
++        self.vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
++        self.embeddings = self.vectorizer.fit_transform([chunk.prompt_text() for chunk in self.chunks])
++
++    def _load_chunks(self):
++        chunks = []
++        chunks.extend(self._load_fact_chunks())
++        chunks.extend(self._load_jutsu_chunks())
++        chunks.extend(self._load_dialogue_chunks())
++        if not chunks:
++            raise ValueError("No knowledge chunks were loaded for the grounded chatbot.")
++        return chunks
++
++    def _load_fact_chunks(self):
++        if not self.facts_path.exists():
++            return []
++
++        chunks = []
++        with self.facts_path.open("r", encoding="utf-8") as file:
++            for line in file:
++                line = line.strip()
++                if not line:
++                    continue
++                item = json.loads(line)
++                title = item.get("title", "Untitled Fact")
++                category = item.get("category", "fact")
++                summary = _clean_text(item.get("summary", ""))
++                if summary:
++                    chunks.append(KnowledgeChunk(category, title, summary))
++        return chunks
++
++    def _load_jutsu_chunks(self):
++        if not self.jutsu_path.exists():
++            return []
++
++        df = pd.read_json(self.jutsu_path, lines=True).fillna("")
++        chunks = []
++        for _, row in df.iterrows():
++            name = _clean_text(row.get("jutsu_name", ""))
++            description = _clean_text(row.get("jutsu_description", ""))
++            jutsu_type = _clean_text(row.get("jutsu_type", ""))
++            if not name or not description:
++                continue
++            text = f"{name} is described as: {description}"
++            if jutsu_type:
++                text += f" Type: {jutsu_type}."
++            chunks.append(KnowledgeChunk("jutsu", name, text))
++        return chunks
++
++    def _load_dialogue_chunks(self):
++        if not self.transcript_path.exists():
++            return []
++
++        df = pd.read_csv(self.transcript_path).dropna(subset=["name", "line"])
++        chunks = []
++        for _, row in df.iterrows():
++            speaker = _clean_text(row.get("name", "Unknown"))
++            line = _clean_text(row.get("line", ""))
++            if len(line) < 20:
++                continue
++            chunks.append(KnowledgeChunk("dialogue", f"{speaker} quote", f"{speaker} says: {line}"))
++        return chunks
++
++    def search(self, query, top_k=4):
++        from sklearn.metrics.pairwise import cosine_similarity
++
++        query = _clean_text(query)
++        if not query:
++            return []
++
++        scores = cosine_similarity(self.vectorizer.transform([query]), self.embeddings).ravel()
++        ranked_indexes = scores.argsort()[::-1]
++
++        results = []
++        for index in ranked_indexes:
++            score = float(scores[index])
++            if score <= 0:
++                break
++            chunk = self.chunks[index]
++            results.append((chunk, score))
++            if len(results) >= top_k:
++                break
++        return results
++
++    def match_identity_chunks(self, query, top_k=3):
++        normalized_query = _normalize_text(query)
++        if not normalized_query:
++            return []
++
++        matches = []
++        query_tokens = set(normalized_query.split())
++        for chunk in self.identity_chunks:
++            normalized_title = _normalize_text(chunk.title)
++            if not normalized_title:
++                continue
++
++            title_tokens = normalized_title.split()
++            aliases = {normalized_title}
++            if len(title_tokens) > 1 and chunk.source_type == "character":
++                aliases.add(title_tokens[0])
++
++            score = 0.0
++            if any(alias and re.search(rf"\b{re.escape(alias)}\b", normalized_query) for alias in aliases):
++                score = 1.0
++            elif query_tokens and set(title_tokens).issubset(query_tokens):
++                score = 0.9
++            elif query_tokens and len(set(title_tokens) & query_tokens) >= 2:
++                score = 0.75
++
++            if score > 0:
++                matches.append((chunk, score))
++
++        matches.sort(key=lambda item: item[1], reverse=True)
++        return matches[:top_k]
++
++
++class GroundedNarutoRAGChatbot:
++    def __init__(
++        self,
++        repo_root,
++        transcript_path="data/naruto.csv",
++        jutsu_path="data/jutsus.jsonl",
++        facts_path="data/naruto_rag_facts.jsonl",
++        model_name="meta-llama/Meta-Llama-3-8B-Instruct",
++        huggingface_token=None,
++    ):
++        self.knowledge_base = NarutoKnowledgeBase(
++            repo_root=repo_root,
++            transcript_path=transcript_path,
++            jutsu_path=jutsu_path,
++            facts_path=facts_path,
++        )
++        self.model_name = model_name
++        self.client = None
++        self.last_error = None
++        if huggingface_token:
++            try:
++                from huggingface_hub import InferenceClient
++
++                self.client = InferenceClient(
++                    base_url="https://router.huggingface.co/v1",
++                    api_key=huggingface_token,
++                )
++            except Exception as exc:
++                self.last_error = str(exc)
++
++    def _build_query(self, message, history):
++        query_parts = [message]
++        if history:
++            for user_message, assistant_message in history[-2:]:
++                if user_message:
++                    query_parts.append(user_message)
++                if assistant_message:
++                    query_parts.append(assistant_message)
++        return " ".join(query_parts)
++
++    def _build_context(self, message, history, top_k=4):
++        query = self._build_query(message, history)
++        semantic_matches = self.knowledge_base.search(query, top_k=top_k)
++        if not self._is_identity_query(message):
++            return semantic_matches
++
++        direct_matches = self.knowledge_base.match_identity_chunks(query, top_k=top_k)
++        combined = []
++        seen = set()
++        for chunk, score in direct_matches + semantic_matches:
++            key = (chunk.source_type, chunk.title, chunk.text)
++            if key in seen:
++                continue
++            combined.append((chunk, score))
++            seen.add(key)
++            if len(combined) >= top_k:
++                break
++        return combined
++
++    def _is_identity_query(self, message):
++        normalized = _normalize_text(message)
++        if self._self_query_intent(message) is not None:
++            return True
++        return any(
++            phrase in normalized
++            for phrase in [
++                "who are you",
++                "who is",
++                "tell me about",
++                "what about",
++                "your character",
++                "about yourself",
++                "describe yourself",
++            ]
++        )
++
++    def _self_query_intent(self, message):
++        normalized = _normalize_text(message)
++        tokens = set(normalized.split())
++
++        if "who are you" in normalized or "what are you" in normalized:
++            return "intro"
++
++        if _contains_phrase(normalized, ["introduce yourself", "about yourself", "describe yourself"]):
++            return "summary"
++
++        has_you_reference = _has_similar_token(normalized, ["you", "your", "yourself"], cutoff=0.8)
++        has_about = _has_similar_token(normalized, ["about"], cutoff=0.6)
++        has_describe_verb = _has_similar_token(normalized, ["explain", "tell", "describe", "introduce"], cutoff=0.72)
++
++        if has_you_reference and "character" in tokens:
++            return "summary"
++
++        if has_you_reference and has_describe_verb and has_about:
++            return "summary"
++
++        return None
++
++    def _self_intro_response(self):
++        naruto_matches = self.knowledge_base.match_identity_chunks("naruto", top_k=1)
++        if naruto_matches:
++            naruto_chunk = naruto_matches[0][0]
++            return (
++                f"I'm Naruto Uzumaki. {naruto_chunk.text} "
++                "My ninja way is to never go back on my word."
++            )
++        return "I'm Naruto Uzumaki, a shinobi from the Hidden Leaf Village who wants to become Hokage."
++
++    def _character_summary_response(self):
++        naruto_matches = self.knowledge_base.match_identity_chunks("naruto", top_k=1)
++        if naruto_matches:
++            naruto_chunk = naruto_matches[0][0]
++            return (
++                f"I'm Naruto Uzumaki. {naruto_chunk.text} "
++                "I'm loud, stubborn, and I never quit when it comes to protecting my friends and chasing my goal of becoming Hokage."
++            )
++        return self._self_intro_response()
++
++    def _format_identity_response(self, chunk):
++        if chunk.source_type == "character":
++            return f"{chunk.text}"
++        return f"{chunk.title}: {chunk.text}"
++
++    def _small_talk_response(self, message, history):
++        normalized = _normalize_text(message)
++        introduced_name = _extract_introduced_name(message)
++
++        if introduced_name:
++            return (
++                f"Nice to meet you, {introduced_name}. I'm Naruto Uzumaki. "
++                "Stick with me and ask anything about Konoha, Team 7, chakra, or my journey to becoming Hokage."
++            )
++
++        if _contains_greeting(normalized):
++            return (
++                "Hey! I'm Naruto Uzumaki. Ask me about characters, jutsu, Konoha, chakra, or anything from the Naruto story."
++            )
++
++        if _contains_phrase(normalized, ["how are you", "howre you", "how r you"]):
++            return (
++                "I'm doing great. I'm fired up and ready to talk about Naruto, jutsu, and the Hidden Leaf Village."
++            )
++
++        if (
++            _contains_phrase(normalized, ["help me", "help me out", "need help"]) or
++            (_contains_phrase(normalized, ["stuck", "problem", "issue", "critical situation"]) and "you" not in normalized)
++        ):
++            return (
++                "I hear you. If you're stuck, break the problem into one step at a time and tell me the exact part you want help with. "
++                "If it is urgent or serious in real life, contact someone nearby who can help you right now."
++            )
++
++        if _contains_phrase(normalized, ["thank you", "thanks", "thx"]):
++            return "You got it. Ask your next question and I'll keep going with you."
++
++        if _contains_phrase(normalized, ["bye", "goodbye", "see you"]):
++            return "See you later. Come back when you want to talk more about Naruto or the shinobi world."
++
++        if history and _contains_phrase(normalized, ["okay", "ok", "got it", "nice", "cool"]):
++            return "Good. Ask the next one and I'll keep the thread going."
++
++        return None
++
++    def _direct_conversational_response(self, message, history):
++        self_query_intent = self._self_query_intent(message)
++        if self_query_intent == "intro":
++            return self._self_intro_response()
++        if self_query_intent == "summary":
++            return self._character_summary_response()
++        return self._small_talk_response(message, history)
++
++    def _chat_with_llm(self, message, history, context_chunks):
++        context_block = "\n".join(chunk.prompt_text() for chunk, _ in context_chunks)
++        messages = [
++            {
++                "role": "system",
++                "content": (
++                    'You are Naruto Uzumaki from the anime "Naruto". '
++                    "Answer in a natural, energetic Naruto voice, but stay grounded in the provided context. "
++                    "Do not invent facts outside the context. If the context is insufficient, say so clearly."
++                ),
++            },
++            {
++                "role": "system",
++                "content": f"Grounding context:\n{context_block}",
++            },
++        ]
++
++        for user_message, assistant_message in history[-3:]:
++            messages.append({"role": "user", "content": user_message})
++            messages.append({"role": "assistant", "content": assistant_message})
++        messages.append({"role": "user", "content": message})
++
++        output = self.client.chat_completion(
++            model=self.model_name,
++            messages=messages,
++            max_tokens=280,
++            temperature=0.5,
++            top_p=0.9,
++        )
++        response = output.choices[0].message.content.strip()
++        sources = ", ".join(chunk.source_label() for chunk, _ in context_chunks[:2])
++        return f"{response}\n\nSources: {sources}"
++
++    def _fallback_response(self, message, history, context_chunks):
++        normalized = _clean_text(message).lower()
++
++        if not context_chunks:
++            return (
++                "I don't have enough grounded info in the local dataset to answer that confidently yet. "
++                "Ask me about Naruto, Team 7, chakra, Konoha, Hokage, Rasengan, Shadow Clone Jutsu, or specific jutsu."
++            )
++
++        top_chunk, top_score = context_chunks[0]
++        if top_score < 0.12:
++            return (
++                "I found only weak matches in the local knowledge base, so I don't want to make something up. "
++                "Try asking more specifically about a character, jutsu, or Naruto concept."
++            )
++
++        supporting = [chunk for chunk, score in context_chunks[1:3] if score >= 0.08]
++        answer_lines = []
++
++        if any(term in normalized for term in ["who is", "tell me about", "what about"]):
++            answer_lines.append(self._format_identity_response(top_chunk))
++        elif any(term in normalized for term in ["what is", "explain", "how does", "why"]):
++            answer_lines.append(f"Here's the grounded summary I found: {_truncate(top_chunk.text, 260)}")
++        else:
++            answer_lines.append(f"Best grounded match: {_truncate(top_chunk.text, 260)}")
++
++        if supporting:
++            answer_lines.append("Related context: " + " | ".join(_truncate(chunk.text, 140) for chunk in supporting))
++
++        sources = ", ".join(chunk.source_label() for chunk, _ in context_chunks[:3])
++        answer_lines.append(f"Sources: {sources}")
++        return "\n\n".join(answer_lines)
++
++    def chat(self, message, history):
++        direct_response = self._direct_conversational_response(message, history)
++        if direct_response is not None:
++            return direct_response
++
++        context_chunks = self._build_context(message, history)
++        if self.client is not None and context_chunks:
++            try:
++                return self._chat_with_llm(message, history, context_chunks)
++            except Exception as exc:
++                self.last_error = str(exc)
++        return self._fallback_response(message, history, context_chunks)
+\ No newline at end of file
+diff --git a/data/naruto_rag_facts.jsonl b/data/naruto_rag_facts.jsonl
+new file mode 100644
+index 0000000..e4b7400
+--- /dev/null
++++ b/data/naruto_rag_facts.jsonl
+@@ -0,0 +1,13 @@
++{"title": "Naruto Uzumaki", "category": "character", "summary": "Naruto Uzumaki is the central protagonist of Naruto, a loud and determined shinobi from the Hidden Leaf Village who wants to become Hokage and earn the village's respect."}
++{"title": "Sasuke Uchiha", "category": "character", "summary": "Sasuke Uchiha is Naruto's rival and teammate on Team 7. He is highly skilled, emotionally guarded, and driven by revenge and personal strength."}
++{"title": "Sakura Haruno", "category": "character", "summary": "Sakura Haruno is Naruto's teammate on Team 7. She combines strong chakra control, intelligence, and later medical-ninjutsu expertise."}
++{"title": "Kakashi Hatake", "category": "character", "summary": "Kakashi Hatake is the leader of Team 7, known for his calm judgment, elite combat ability, and emphasis on teamwork."}
++{"title": "Iruka Umino", "category": "character", "summary": "Iruka Umino is one of Naruto's earliest mentors and one of the first adults to openly care for and acknowledge him."}
++{"title": "Kurama", "category": "character", "summary": "Kurama, the Nine-Tailed Fox, is the tailed beast sealed inside Naruto. Their relationship changes over time from hostility to cooperation."}
++{"title": "Konoha", "category": "location", "summary": "Konoha, also called the Hidden Leaf Village, is Naruto's home village and a central political and military power in the series."}
++{"title": "Hokage", "category": "concept", "summary": "The Hokage is the leader of the Hidden Leaf Village. Naruto's long-term dream is to become Hokage so he can protect the village and be acknowledged by everyone."}
++{"title": "Chakra", "category": "concept", "summary": "Chakra is the core energy system used by shinobi to perform techniques such as ninjutsu, genjutsu, and taijutsu-enhanced combat."}
++{"title": "Shadow Clone Jutsu", "category": "jutsu_fact", "summary": "Shadow Clone Jutsu is one of Naruto's signature techniques. It creates physical clones that can fight and act independently instead of being simple illusions."}
++{"title": "Rasengan", "category": "jutsu_fact", "summary": "The Rasengan is a high-level chakra technique built from concentrated rotational chakra. It becomes one of Naruto's defining attacks."}
++{"title": "Team 7", "category": "team", "summary": "Team 7 includes Naruto Uzumaki, Sasuke Uchiha, Sakura Haruno, and Kakashi Hatake as their sensei. Their dynamic is central to the early story."}
++{"title": "Naruto's Goal", "category": "motivation", "summary": "Naruto's core motivation is to be recognized, protect his friends, and become Hokage without giving up on his personal ninja way."}
+\ No newline at end of file
+diff --git a/gradio_app.py b/gradio_app.py
+index 1de8888..1a436ac 100644
+--- a/gradio_app.py
++++ b/gradio_app.py
+@@ -1,5 +1,7 @@
++import html
+ import os
+ import re
++import socket
+ from functools import lru_cache
+ from pathlib import Path
+ 
+@@ -14,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parent
+ DEFAULT_CHATBOT_MODEL = "AbdullahTarek/Naruto_Llama-3-8B"
+ DEFAULT_HOSTED_CHAT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+ DEFAULT_TEXT_CLASSIFIER_MODEL = "demo-auto"
++DEFAULT_RAG_FACTS_PATH = "data/naruto_rag_facts.jsonl"
+ JUTSU_LABELS = ["Ninjutsu", "Genjutsu", "Taijutsu"]
+ 
+ 
+@@ -49,6 +52,18 @@ def _clean_chat_text(text):
+     return cleaned.strip()
+ 
+ 
++def _find_available_port(start_port, host="127.0.0.1", max_attempts=20):
++    port = start_port
++    for _ in range(max_attempts):
++        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
++            try:
++                sock.bind((host, port))
++                return port
++            except OSError:
++                port += 1
++    raise RuntimeError(f"Could not find an open port starting at {start_port}.")
++
++
+ def _require_huggingface_token():
+     huggingface_token = os.getenv("huggingface_token")
+     if not huggingface_token:
+@@ -192,7 +207,7 @@ class CharacterChatbotFacade:
+         self.primary_error = None
+         self.local_model_attempted = False
+         self.local_model_chatbot = None
+-        self.demo_chatbot = None
++        self.rag_chatbot = None
+ 
+     def _get_primary_chatbot(self):
+         if self.primary_disabled:
+@@ -243,10 +258,19 @@ class CharacterChatbotFacade:
+         )
+         return self.local_model_chatbot
+ 
+-    def _get_demo_chatbot(self):
+-        if self.demo_chatbot is None:
+-            self.demo_chatbot = LocalNarutoDemoChatbot("data/naruto.csv")
+-        return self.demo_chatbot
++    def _get_rag_chatbot(self):
++        if self.rag_chatbot is None:
++            from character_chatbot import GroundedNarutoRAGChatbot
++
++            self.rag_chatbot = GroundedNarutoRAGChatbot(
++                repo_root=REPO_ROOT,
++                transcript_path="data/naruto.csv",
++                jutsu_path="data/jutsus.jsonl",
++                facts_path=DEFAULT_RAG_FACTS_PATH,
++                model_name=os.getenv("NARUTO_CHATBOT_HOSTED_MODEL", DEFAULT_HOSTED_CHAT_MODEL),
++                huggingface_token=os.getenv("huggingface_token"),
++            )
++        return self.rag_chatbot
+ 
+     def chat(self, message, history):
+         primary_chatbot = self._get_primary_chatbot()
+@@ -265,7 +289,7 @@ class CharacterChatbotFacade:
+         except Exception as exc:
+             self.primary_error = str(exc)
+ 
+-        return self._get_demo_chatbot().chat(message, history)
++        return self._get_rag_chatbot().chat(message, history)
+ 
+ 
+ @lru_cache(maxsize=1)
+@@ -357,63 +381,881 @@ def chat_with_character_chatbot(message, history):
+     return str(output).strip()
+ 
+ 
+-def main():
+-    with gr.Blocks() as iface:
+-        gr.Markdown(
+-            "# Naruto Series Analysis\n"
+-            "This UI starts locally on your machine. The chatbot will use hosted or local Llama inference when available, and automatically fall back to a local demo chatbot when those paths are unavailable."
++def _empty_chat_markup():
++    return """
++    <div class='qa-empty'>
++        <div class='qa-empty-title'>Ask a Naruto question</div>
++        <div class='qa-empty-copy'>Enter a question above and the generated answer will appear here in a clean stacked view.</div>
++    </div>
++    """
++
++
++def _render_chat_response(history):
++    if not history:
++        return _empty_chat_markup()
++
++    cards = []
++    for turn_index, (message, response) in enumerate(history, start=1):
++        safe_message = html.escape(str(message).strip())
++        safe_response = html.escape(str(response).strip()).replace("\n", "<br>")
++        cards.append(
++            f"""
++            <div class='qa-turn'>
++                <div class='qa-turn-index'>Turn {turn_index}</div>
++                <div class='qa-card qa-question'>
++                    <div class='qa-label'>Question</div>
++                    <div class='qa-text'>{safe_message}</div>
++                </div>
++                <div class='qa-card qa-answer'>
++                    <div class='qa-label'>Naruto Chat</div>
++                    <div class='qa-text'>{safe_response}</div>
++                </div>
++            </div>
++            """
+         )
+ 
+-        # Theme Classification Section
+-        with gr.Row():
+-            with gr.Column():
+-                gr.HTML("<h1>Theme Classification (Zero Shot Claasifiers)</h1>")
+-                with gr.Row():
+-                    with gr.Column():
+-                        plot = gr.BarPlot()
+-                    with gr.Column():
+-                        theme_list = gr.Textbox(label="Themes", value="friendship, rivalry, hard work, dialogue")
+-                        subtitles_path = gr.Textbox(label="Subtitles or script Path", value="data/Subtitles")
+-                        save_path = gr.Textbox(label="Save Path", value="stubs/theme_classifier_output.csv")
+-                        get_themes_button =gr.Button("Get Themes")
+-                        get_themes_button.click(get_themes, inputs=[theme_list,subtitles_path,save_path], outputs=[plot])
+-
+-        # Character Network Section
+-        with gr.Row():
+-            with gr.Column():
+-                gr.HTML("<h1>Character Network (NERs and Graphs)</h1>")
+-                with gr.Row():
+-                    with gr.Column():
+-                        network_html = gr.HTML()
+-                    with gr.Column():
+-                        subtitles_path = gr.Textbox(label="Subtutles or Script Path", value="data/Subtitles")
+-                        ner_path = gr.Textbox(label="NERs save path", value="stubs/ner_output.csv")
+-                        get_network_graph_button = gr.Button("Get Character Network")
+-                        get_network_graph_button.click(get_character_network, inputs=[subtitles_path,ner_path], outputs=[network_html])
+-
+-        # Text Classification with LLMs
+-        with gr.Row():
+-            with gr.Column():
+-                gr.HTML("<h1>Text Classification with LLMs</h1>")
+-                with gr.Row():
+-                    with gr.Column():
+-                        text_classification_output = gr.Textbox(label="Text Classification Output")
+-                    with gr.Column():
+-                        text_classifcation_model = gr.Textbox(label='Model Path', value=DEFAULT_TEXT_CLASSIFIER_MODEL)
+-                        text_classifcation_data_path = gr.Textbox(label='Data Path', value='data/jutsus.jsonl')
+-                        text_to_classify = gr.Textbox(label='Text input', value='Shadow Clone Jutsu creates copies of the user to overwhelm the enemy.')
+-                        classify_text_button = gr.Button("Clasify Text (Jutsu)")
++    return f"<div class='qa-thread'>{''.join(cards)}</div>"
++
++
++def ask_character_chatbot(message, history):
++    cleaned_message = str(message or "").strip()
++    if not cleaned_message:
++        raise gr.Error("Enter a question before generating a response.")
++
++    history = history or []
++    response = chat_with_character_chatbot(cleaned_message, history)
++    updated_history = history + [(cleaned_message, response)]
++    return _render_chat_response(updated_history), updated_history, ""
++
++
++def clear_character_chatbot_panel():
++    return _empty_chat_markup(), [], ""
++
++
++APP_CSS = """
++@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap');
++
++:root {
++    --bg: #f3ede3;
++    --surface: rgba(255, 252, 247, 0.94);
++    --surface-strong: #fffdf9;
++    --surface-soft: rgba(255, 248, 239, 0.84);
++    --border: rgba(43, 59, 74, 0.1);
++    --ink: #15202b;
++    --muted: #617080;
++    --accent: #167c80;
++    --accent-deep: #114b5f;
++    --accent-soft: #d9eeef;
++    --gold: #7d9fc0;
++    --theme-accent: #1f8a70;
++    --network-accent: #2d6a9f;
++    --classify-accent: #3f5c9a;
++    --chat-accent: #10a37f;
++    --shadow-lg: 0 30px 70px rgba(42, 60, 79, 0.12);
++    --shadow-md: 0 18px 36px rgba(42, 60, 79, 0.08);
++}
++
++body, .gradio-container {
++    font-family: 'Manrope', sans-serif;
++    background:
++        radial-gradient(circle at top left, rgba(22, 124, 128, 0.12), transparent 24%),
++        radial-gradient(circle at 88% 8%, rgba(125, 159, 192, 0.16), transparent 18%),
++        linear-gradient(180deg, #f7f9fb 0%, #e9eff3 100%);
++    color: var(--ink);
++}
++
++.gradio-container {
++    max-width: 1320px !important;
++    padding-top: 28px !important;
++    padding-bottom: 48px !important;
++}
++
++.app-shell {
++    border: 1px solid var(--border);
++    border-radius: 32px;
++    padding: 30px;
++    background: rgba(255, 249, 242, 0.7);
++    backdrop-filter: blur(14px);
++    box-shadow: var(--shadow-lg);
++}
++
++.topbar {
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++    gap: 14px;
++    margin-bottom: 16px;
++    padding: 0 4px;
++}
++
++.brand-lockup {
++    display: flex;
++    align-items: center;
++    gap: 12px;
++}
++
++.brand-mark {
++    width: 42px;
++    height: 42px;
++    border-radius: 14px;
++    background: linear-gradient(135deg, var(--accent-deep), var(--accent), var(--gold));
++    box-shadow: 0 12px 24px rgba(17, 75, 95, 0.2);
++}
++
++.brand-copy h1 {
++    margin: 0;
++    font-family: 'Fraunces', serif;
++    font-size: 1.3rem;
++    line-height: 1;
++}
++
++.brand-copy p {
++    margin: 4px 0 0;
++    color: var(--muted);
++    font-size: 0.9rem;
++}
++
++.status-pill {
++    display: inline-flex;
++    align-items: center;
++    gap: 8px;
++    padding: 10px 14px;
++    border-radius: 999px;
++    border: 1px solid rgba(16, 163, 127, 0.16);
++    background: rgba(16, 163, 127, 0.08);
++    color: #176a60;
++    font-size: 0.88rem;
++    font-weight: 700;
++}
++
++.hero {
++    background:
++        linear-gradient(140deg, rgba(17, 75, 95, 0.98), rgba(22, 124, 128, 0.92) 50%, rgba(125, 159, 192, 0.94));
++    color: #f5fbfc;
++    border-radius: 30px;
++    padding: 34px;
++    position: relative;
++    overflow: hidden;
++    box-shadow: 0 24px 52px rgba(17, 75, 95, 0.22);
++}
++
++.hero::after {
++    content: '';
++    position: absolute;
++    right: -40px;
++    bottom: -60px;
++    width: 240px;
++    height: 240px;
++    border-radius: 50%;
++    background: rgba(255, 255, 255, 0.08);
++}
++
++.hero::before {
++    content: '';
++    position: absolute;
++    top: -60px;
++    right: 140px;
++    width: 180px;
++    height: 180px;
++    border-radius: 50%;
++    border: 1px solid rgba(255, 255, 255, 0.12);
++}
++
++.hero-layout {
++    position: relative;
++    z-index: 1;
++    display: flex;
++    flex-wrap: wrap;
++    gap: 28px;
++}
++
++.hero-main {
++    flex: 1 1 620px;
++    min-width: 0;
++}
++
++.hero-side {
++    flex: 0 1 300px;
++    min-width: 260px;
++    padding: 18px;
++    border-radius: 22px;
++    background: rgba(245, 251, 252, 0.12);
++    border: 1px solid rgba(245, 251, 252, 0.16);
++    backdrop-filter: blur(10px);
++}
++
++.hero-kicker {
++    display: inline-flex;
++    align-items: center;
++    gap: 8px;
++    padding: 7px 12px;
++    border-radius: 999px;
++    background: rgba(245, 251, 252, 0.14);
++    border: 1px solid rgba(245, 251, 252, 0.2);
++    font-size: 0.8rem;
++    font-weight: 800;
++    letter-spacing: 0.08em;
++    text-transform: uppercase;
++}
++
++.hero h1 {
++    margin: 16px 0 0;
++    font-family: 'Fraunces', serif;
++    font-size: clamp(2.4rem, 4.6vw, 4rem);
++    line-height: 0.96;
++    letter-spacing: -0.04em;
++    max-width: 680px;
++}
++
++.hero p {
++    margin: 16px 0 0;
++    max-width: 700px;
++    color: rgba(245, 251, 252, 0.9);
++    font-size: 1.02rem;
++    line-height: 1.65;
++}
++
++.hero-grid {
++    margin-top: 18px;
++    display: flex;
++    flex-wrap: wrap;
++    gap: 10px;
++}
++
++.hero-pill {
++    padding: 10px 13px;
++    border-radius: 999px;
++    background: rgba(245, 251, 252, 0.12);
++    border: 1px solid rgba(245, 251, 252, 0.12);
++    font-size: 0.88rem;
++    font-weight: 600;
++}
++
++.hero-side h3 {
++    margin: 0;
++    font-size: 1rem;
++    letter-spacing: 0.02em;
++}
++
++.hero-side p {
++    margin: 10px 0 0;
++    font-size: 0.94rem;
++    line-height: 1.6;
++    color: rgba(245, 251, 252, 0.85);
++}
++
++.hero-list {
++    margin: 14px 0 0;
++    padding: 0;
++    list-style: none;
++}
++
++.hero-list li {
++    padding: 10px 0;
++    border-top: 1px solid rgba(245, 251, 252, 0.12);
++    font-size: 0.92rem;
++}
++
++.overview-strip {
++    margin: 18px 0 20px;
++    display: grid;
++    grid-template-columns: repeat(4, minmax(0, 1fr));
++    gap: 14px;
++}
++
++.overview-card {
++    padding: 18px 18px 16px;
++    border-radius: 22px;
++    background: var(--surface);
++    border: 1px solid var(--border);
++    box-shadow: var(--shadow-md);
++}
++
++.overview-card .label {
++    font-size: 0.76rem;
++    font-weight: 800;
++    letter-spacing: 0.08em;
++    text-transform: uppercase;
++    color: var(--muted);
++}
++
++.overview-card .value {
++    display: block;
++    margin-top: 8px;
++    font-family: 'Fraunces', serif;
++    font-size: 1.5rem;
++    line-height: 1;
++}
++
++.overview-card .meta {
++    display: block;
++    margin-top: 8px;
++    color: var(--muted);
++    font-size: 0.9rem;
++}
++
++.section-card {
++    background: var(--surface);
++    border: 1px solid var(--border);
++    border-radius: 24px;
++    padding: 24px;
++    box-shadow: var(--shadow-md);
++    position: relative;
++}
++
++.section-card::before {
++    content: '';
++    position: absolute;
++    inset: 0 0 auto 0;
++    height: 4px;
++    border-radius: 22px 22px 0 0;
++    background: var(--accent);
++}
++
++.theme-card::before {
++    background: var(--theme-accent);
++}
++
++.network-card::before {
++    background: var(--network-accent);
++}
++
++.classify-card::before {
++    background: var(--classify-accent);
++}
++
++.chat-card::before {
++    background: var(--chat-accent);
++}
++
++.section-header {
++    margin-bottom: 20px;
++}
++
++.section-header .eyebrow {
++    display: inline-block;
++    margin-bottom: 8px;
++    font-size: 0.78rem;
++    font-weight: 800;
++    letter-spacing: 0.08em;
++    text-transform: uppercase;
++    color: var(--accent-deep);
++}
++
++.section-header h2 {
++    margin: 0;
++    font-family: 'Fraunces', serif;
++    font-size: 1.8rem;
++    line-height: 1.05;
++    color: var(--ink);
++}
++
++.section-header p {
++    margin: 8px 0 0;
++    color: var(--muted);
++    font-size: 0.95rem;
++}
++
++.workspace-tabs {
++    margin-top: 8px;
++}
++
++.workspace-tabs .tab-nav {
++    gap: 10px;
++    background: transparent !important;
++    border: none !important;
++    margin-bottom: 16px;
++}
++
++.workspace-tabs .tab-nav button {
++    border-radius: 999px !important;
++    border: 1px solid rgba(83, 58, 35, 0.1) !important;
++    background: rgba(255, 251, 246, 0.88) !important;
++    color: var(--muted) !important;
++    font-weight: 800 !important;
++    padding: 12px 16px !important;
++    box-shadow: 0 8px 18px rgba(78, 49, 22, 0.05);
++}
++
++.workspace-tabs .tab-nav button.selected {
++    background: linear-gradient(135deg, var(--accent-deep), var(--accent)) !important;
++    color: #f7fcfd !important;
++    border-color: transparent !important;
++}
++
++.workspace-pane {
++    min-height: 560px;
++}
++
++.control-stack {
++    display: flex;
++    flex-direction: column;
++    gap: 10px;
++}
++
++.output-shell {
++    padding: 14px;
++    border-radius: 20px;
++    background: var(--surface-strong);
++    border: 1px solid rgba(83, 58, 35, 0.08);
++    min-height: 360px;
++}
++
++.chat-shell {
++    padding: 0;
++    border-radius: 24px;
++    background: #ffffff;
++    border: 1px solid rgba(43, 59, 74, 0.08);
++    overflow: hidden;
++}
++
++.section-footnote {
++    margin-top: 14px;
++    color: var(--muted);
++    font-size: 0.9rem;
++    line-height: 1.6;
++}
++
++.gr-button {
++    border-radius: 16px !important;
++    border: none !important;
++    background: linear-gradient(135deg, var(--accent-deep), var(--accent)) !important;
++    color: #f7fcfd !important;
++    box-shadow: 0 14px 26px rgba(17, 75, 95, 0.18);
++    font-weight: 800 !important;
++    letter-spacing: 0.01em;
++    min-height: 46px;
++}
++
++.gr-button:hover {
++    filter: brightness(1.03);
++}
++
++.gr-textbox, .gr-html, .gr-chatbot, .gr-form, .gradio-html {
++    border-radius: 18px !important;
++}
++
++.gr-box, .gr-panel {
++    border-color: var(--border) !important;
++}
++
++label span,
++.gr-form label,
++.gr-block label {
++    font-size: 0.82rem !important;
++    font-weight: 800 !important;
++    letter-spacing: 0.04em;
++    text-transform: uppercase;
++    color: var(--muted) !important;
++}
++
++textarea,
++input,
++.gr-textbox textarea,
++.gr-textbox input {
++    background: rgba(255, 253, 248, 0.98) !important;
++    border: 1px solid rgba(83, 58, 35, 0.12) !important;
++    border-radius: 16px !important;
++    color: var(--ink) !important;
++    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
++    min-height: 48px;
++}
++
++textarea:focus,
++input:focus,
++.gr-textbox textarea:focus,
++.gr-textbox input:focus {
++    border-color: rgba(217, 95, 45, 0.5) !important;
++    box-shadow: 0 0 0 4px rgba(217, 95, 45, 0.12) !important;
++}
++
++.gr-chatbot {
++    background: #ffffff !important;
++    border: none !important;
++}
++
++.chat-input-area {
++    padding: 18px 18px 14px;
++    border-bottom: 1px solid rgba(43, 59, 74, 0.08);
++    background: linear-gradient(180deg, #ffffff 0%, #f7fbfc 100%);
++}
++
++.chat-output-area {
++    min-height: 430px;
++    padding: 18px;
++    background: #fbfdfe;
++}
++
++.qa-thread {
++    max-width: 860px;
++    margin: 0 auto;
++    display: flex;
++    flex-direction: column;
++    gap: 22px;
++}
++
++.qa-turn {
++    display: flex;
++    flex-direction: column;
++    gap: 12px;
++}
++
++.qa-turn-index {
++    align-self: flex-start;
++    padding: 6px 10px;
++    border-radius: 999px;
++    background: rgba(22, 124, 128, 0.08);
++    color: var(--accent-deep);
++    font-size: 0.76rem;
++    font-weight: 800;
++    letter-spacing: 0.06em;
++    text-transform: uppercase;
++}
++
++.qa-card {
++    border-radius: 22px;
++    padding: 18px 20px;
++    border: 1px solid rgba(43, 59, 74, 0.08);
++    background: #ffffff;
++    box-shadow: 0 10px 24px rgba(42, 60, 79, 0.05);
++}
++
++.qa-question {
++    background: #eef7f5;
++    border-color: rgba(16, 163, 127, 0.14);
++}
++
++.qa-answer {
++    background: #ffffff;
++}
++
++.qa-label {
++    font-size: 0.76rem;
++    font-weight: 800;
++    letter-spacing: 0.08em;
++    text-transform: uppercase;
++    color: var(--muted);
++    margin-bottom: 10px;
++}
++
++.qa-text {
++    font-size: 0.98rem;
++    line-height: 1.75;
++    color: var(--ink);
++}
++
++.qa-empty {
++    max-width: 860px;
++    min-height: 330px;
++    margin: 0 auto;
++    border: 1px dashed rgba(43, 59, 74, 0.14);
++    border-radius: 24px;
++    background: linear-gradient(180deg, #ffffff 0%, #f8fbfd 100%);
++    display: flex;
++    flex-direction: column;
++    justify-content: center;
++    align-items: center;
++    text-align: center;
++    padding: 32px;
++}
++
++.qa-empty-title {
++    font-family: 'Fraunces', serif;
++    font-size: 1.7rem;
++    line-height: 1.1;
++}
++
++.qa-empty-copy {
++    margin-top: 10px;
++    max-width: 560px;
++    color: var(--muted);
++    font-size: 0.98rem;
++    line-height: 1.7;
++}
++
++.gradio-container .prose,
++.gradio-container .markdown {
++    color: var(--ink);
++}
++
++.plot-wrap,
++.network-wrap,
++.result-wrap {
++    border-radius: 18px;
++    background: rgba(255, 252, 247, 0.86);
++    border: 1px solid rgba(83, 58, 35, 0.08);
++    padding: 10px;
++}
++
++.chat-note {
++    margin-top: 12px;
++    color: var(--muted);
++    font-size: 0.9rem;
++    line-height: 1.5;
++}
++
++.app-footer {
++    margin-top: 20px;
++    padding-top: 14px;
++    border-top: 1px solid rgba(43, 59, 74, 0.08);
++    text-align: right;
++    color: var(--muted);
++    font-size: 0.92rem;
++    letter-spacing: 0.02em;
++}
++
++@media (max-width: 768px) {
++    .app-shell {
++        padding: 14px;
++    }
++
++    .topbar {
++        flex-direction: column;
++        align-items: flex-start;
++    }
++
++    .hero {
++        padding: 22px 18px;
++    }
++
++    .overview-strip {
++        grid-template-columns: 1fr;
++    }
++
++    .section-card {
++        padding: 18px;
++    }
++
++    .workspace-pane {
++        min-height: auto;
++    }
++}
++"""
++
++
++APP_HEAD = """
++<script>
++(() => {
++    if (window.__narutoChatHeadBindingAttached) {
++        return;
++    }
++
++    window.__narutoChatHeadBindingAttached = true;
++    document.addEventListener('keydown', (event) => {
++        if (event.key !== 'Enter' || event.shiftKey || event.isComposing) {
++            return;
++        }
++
++        const activeElement = document.activeElement;
++        if (!activeElement || activeElement.tagName !== 'TEXTAREA') {
++            return;
++        }
++
++        const root = activeElement.closest('#naruto-chat-question');
++        if (!root) {
++            return;
++        }
++
++        const button = document.getElementById('naruto-chat-submit');
++        if (!button) {
++            return;
++        }
++
++        event.preventDefault();
++        event.stopPropagation();
++        button.click();
++    }, true);
++})();
++</script>
++"""
++
++
++def main():
++    with gr.Blocks(css=APP_CSS, head=APP_HEAD, title="Naruto Series Analysis") as iface:
++        with gr.Column(elem_classes=["app-shell"]):
++            gr.HTML(
++                """
++                <div class='topbar'>
++                    <div class='brand-lockup'>
++                        <div class='brand-mark'></div>
++                        <div class='brand-copy'>
++                            <h1>Naruto Series Analysis</h1>
++                            <p>NLP workspace for subtitle analysis, graphs, classification, and grounded chat.</p>
++                        </div>
++                    </div>
++                    <div class='status-pill'>Grounded analysis workspace</div>
++                </div>
++                <section class='hero'>
++                    <div class='hero-layout'>
++                        <div class='hero-main'>
++                            <div class='hero-kicker'>Naruto NLP Workspace</div>
++                            <h1>One interface for story analysis, relationship mapping, jutsu classification, and character-grounded chat.</h1>
++                            <p>This workspace turns subtitle and metadata assets into an interactive analysis app with reusable local outputs, structured feature flows, and a cleaner interface for exploring the project.</p>
++                            <div class='hero-grid'>
++                                <div class='hero-pill'>Theme scoring from subtitles</div>
++                                <div class='hero-pill'>Graph-based character mapping</div>
++                                <div class='hero-pill'>Jutsu type classification</div>
++                                <div class='hero-pill'>Grounded Naruto knowledge chat</div>
++                            </div>
++                        </div>
++                        <div class='hero-side'>
++                            <h3>Workspace Flow</h3>
++                            <p>Use the tabs below to move between analysis modules without the page feeling crowded.</p>
++                            <ul class='hero-list'>
++                                <li>Start with theme or graph generation from subtitle data.</li>
++                                <li>Validate individual descriptions in the jutsu classifier.</li>
++                                <li>Use the chatbot tab for grounded character and concept questions.</li>
++                            </ul>
++                        </div>
++                    </div>
++                </section>
++                <section class='overview-strip'>
++                    <div class='overview-card'>
++                        <span class='label'>Theme Engine</span>
++                        <span class='value'>Zero-shot</span>
++                        <span class='meta'>Custom theme scoring on subtitle batches.</span>
++                    </div>
++                    <div class='overview-card'>
++                        <span class='label'>Network View</span>
++                        <span class='value'>Entity Graph</span>
++                        <span class='meta'>Character relationships built from NER output.</span>
++                    </div>
++                    <div class='overview-card'>
++                        <span class='label'>Classifier</span>
++                        <span class='value'>Ninjutsu / Genjutsu / Taijutsu</span>
++                        <span class='meta'>Model-backed classification with fallback support.</span>
++                    </div>
++                    <div class='overview-card'>
++                        <span class='label'>Chat Layer</span>
++                        <span class='value'>Grounded RAG</span>
++                        <span class='meta'>Answers based on local dialogue, facts, and jutsu data.</span>
++                    </div>
++                </section>
++                """
++            )
++
++            with gr.Tabs(elem_classes=["workspace-tabs"]):
++                with gr.Tab("Theme Analysis"):
++                    with gr.Column(elem_classes=["section-card", "theme-card", "workspace-pane"]):
++                        gr.HTML(
++                            """
++                            <div class='section-header'>
++                                <div class='eyebrow'>Analysis</div>
++                                <h2>Theme Classification</h2>
++                                <p>Score custom narrative themes from subtitle files and inspect the aggregate signal in a dedicated analysis view.</p>
++                            </div>
++                            """
++                        )
++                        with gr.Row(equal_height=True):
++                            with gr.Column(scale=8, elem_classes=["output-shell"]):
++                                plot = gr.BarPlot(height=340)
++                            with gr.Column(scale=4, elem_classes=["control-stack"]):
++                                theme_list = gr.Textbox(label="Themes", value="friendship, rivalry, hard work, dialogue")
++                                subtitles_path = gr.Textbox(label="Subtitles Path", value="data/Subtitles")
++                                save_path = gr.Textbox(label="Cached Output Path", value="stubs/theme_classifier_output.csv")
++                                get_themes_button = gr.Button("Generate Theme Scores")
++                                get_themes_button.click(get_themes, inputs=[theme_list,subtitles_path,save_path], outputs=[plot])
++                                gr.HTML("<div class='section-footnote'>Use a short comma-separated theme list to keep the result chart readable and presentation-friendly.</div>")
++
++                with gr.Tab("Character Network"):
++                    with gr.Column(elem_classes=["section-card", "network-card", "workspace-pane"]):
++                        gr.HTML(
++                            """
++                            <div class='section-header'>
++                                <div class='eyebrow'>Graph</div>
++                                <h2>Character Network</h2>
++                                <p>Generate a relationship graph from subtitle entities and reuse cached named-entity output for faster runs.</p>
++                            </div>
++                            """
++                        )
++                        with gr.Row(equal_height=True):
++                            with gr.Column(scale=8, elem_classes=["output-shell"]):
++                                network_html = gr.HTML()
++                            with gr.Column(scale=4, elem_classes=["control-stack"]):
++                                network_subtitles_path = gr.Textbox(label="Subtitles Path", value="data/Subtitles")
++                                ner_path = gr.Textbox(label="NER Output Path", value="stubs/ner_output.csv")
++                                get_network_graph_button = gr.Button("Generate Character Graph")
++                                get_network_graph_button.click(get_character_network, inputs=[network_subtitles_path,ner_path], outputs=[network_html])
++                                gr.HTML("<div class='section-footnote'>Cached NER output makes this view much faster during live demos and repeated walkthroughs.</div>")
++
++                with gr.Tab("Jutsu Classifier"):
++                    with gr.Column(elem_classes=["section-card", "classify-card", "workspace-pane"]):
++                        gr.HTML(
++                            """
++                            <div class='section-header'>
++                                <div class='eyebrow'>Classifier</div>
++                                <h2>Jutsu Classification</h2>
++                                <p>Validate a jutsu description against the local classifier path or the zero-shot fallback when a trained model is not available.</p>
++                            </div>
++                            """
++                        )
++                        with gr.Row(equal_height=True):
++                            with gr.Column(scale=5, elem_classes=["control-stack"]):
++                                text_classifcation_model = gr.Textbox(label='Model Path', value=DEFAULT_TEXT_CLASSIFIER_MODEL)
++                                text_classifcation_data_path = gr.Textbox(label='Data Path', value='data/jutsus.jsonl')
++                                text_to_classify = gr.Textbox(label='Text Input', value='Shadow Clone Jutsu creates copies of the user to overwhelm the enemy.', lines=7)
++                                classify_text_button = gr.Button("Classify Jutsu")
++                            with gr.Column(scale=7, elem_classes=["output-shell"]):
++                                text_classification_output = gr.Textbox(label="Classification Output", lines=12)
+                         classify_text_button.click(classify_text, inputs=[text_classifcation_model,text_classifcation_data_path,text_to_classify], outputs=[text_classification_output])
+ 
+-        # Character Chatbot Section
+-        with gr.Row():
+-            with gr.Column():
+-                gr.HTML("<h1>Character Chatbot</h1>")
+-                gr.ChatInterface(chat_with_character_chatbot)
++                with gr.Tab("Naruto Chat"):
++                    with gr.Column(elem_classes=["section-card", "chat-card", "workspace-pane"]):
++                        gr.HTML(
++                            """
++                            <div class='section-header'>
++                                <div class='eyebrow'>Chat</div>
++                                <h2>Character Chatbot</h2>
++                                <p>Ask a grounded Naruto question and review the response in a clean stacked question-and-answer layout.</p>
++                            </div>
++                            """
++                        )
++                        chat_history = gr.State([])
++                        with gr.Column(elem_classes=["chat-shell"]):
++                            with gr.Column(elem_classes=["chat-input-area"]):
++                                chatbot_question = gr.Textbox(
++                                    label="Ask Naruto Chat",
++                                    placeholder="Ask who Naruto is, how Rasengan works, what Team 7 is, or any grounded Naruto question...",
++                                    lines=3,
++                                    elem_id="naruto-chat-question",
++                                )
++                                with gr.Row():
++                                    ask_button = gr.Button("Generate Response", elem_id="naruto-chat-submit")
++                                    clear_button = gr.Button("Clear", variant="secondary")
++                            with gr.Column(elem_classes=["chat-output-area"]):
++                                chatbot_response = gr.HTML(
++                                    """
++                                    <div class='qa-empty'>
++                                        <div class='qa-empty-title'>Ask a Naruto question</div>
++                                        <div class='qa-empty-copy'>Enter a question above and the generated answer will appear here in a clean stacked view.</div>
++                                    </div>
++                                    """
++                                )
++                        ask_button.click(
++                            ask_character_chatbot,
++                            inputs=[chatbot_question, chat_history],
++                            outputs=[chatbot_response, chat_history, chatbot_question],
++                        )
++                        chatbot_question.submit(
++                            ask_character_chatbot,
++                            inputs=[chatbot_question, chat_history],
++                            outputs=[chatbot_response, chat_history, chatbot_question],
++                        )
++                        clear_button.click(
++                            clear_character_chatbot_panel,
++                            outputs=[chatbot_response, chat_history, chatbot_question],
++                        )
++                        gr.HTML("<div class='chat-note'>The chatbot retrieves context from local project data before using hosted or local generation.</div>")
++
++            gr.HTML("<div class='app-footer'>Bardawal Bihari</div>")
++
++    server_name = os.getenv("GRADIO_SERVER_NAME", "127.0.0.1")
++    requested_port = int(os.getenv("GRADIO_SERVER_PORT", "7860"))
++    server_port = _find_available_port(requested_port, host=server_name)
+ 
+     iface.launch(
+-        server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
+-        server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
++        server_name=server_name,
++        server_port=server_port,
+         share=False,
+         _frontend=False,
+     )
+diff --git a/requirements.txt b/requirements.txt
+index 02d9415..9b32b34 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -13,6 +13,7 @@ networkx==3.3
+ pyvis==0.3.2
+ python-dotenv==1.0.1
+ scikit-learn==1.5.1
++scipy==1.13.1
+ spacy==3.7.5
+ starlette==0.37.2
+ torch==2.4.1
+diff --git a/run_app.bat b/run_app.bat
+index f0407b5..6ff4ef4 100644
+--- a/run_app.bat
++++ b/run_app.bat
+@@ -4,6 +4,8 @@ setlocal
+ 
+ set "VENV_DIR=.venv"
+ set "NEED_INSTALL=0"
++set "PYTHON_CMD="
++set "APP_PORT="
+ 
+ echo.
+ echo =====================================================
+@@ -24,16 +26,18 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
+ ) else (
+     echo Activating virtual environment...
+     call "%VENV_DIR%\Scripts\activate.bat"
+-    python -c "import gradio, transformers, pandas, dotenv" >nul 2>&1
++    python -c "import gradio, transformers, pandas, dotenv, scipy, torch; assert hasattr(torch, 'Tensor')" >nul 2>&1
+     if errorlevel 1 (
+         set "NEED_INSTALL=1"
+     )
+ )
+ 
++set "PYTHON_CMD=%CD%\%VENV_DIR%\Scripts\python.exe"
++
+ if "%NEED_INSTALL%"=="1" (
+     echo Installing dependencies...
+-    pip install --upgrade pip
+-    pip install -r requirements.txt
++    "%PYTHON_CMD%" -m pip install --upgrade pip
++    "%PYTHON_CMD%" -m pip install -i https://pypi.org/simple -r requirements.txt
+ )
+ 
+ if not exist .env (
+@@ -43,17 +47,26 @@ if not exist .env (
+     )
+ )
+ 
++for /f %%P in ('"%PYTHON_CMD%" -c "import socket; port=7860
++while True:
++    with socket.socket() as s:
++        try:
++            s.bind(('127.0.0.1', port))
++            print(port)
++            break
++        except OSError:
++            port += 1"') do set "APP_PORT=%%P"
++
+ echo.
+ echo =====================================================
+ echo    Starting Gradio Application
+ echo =====================================================
+ echo.
+-echo The app will open at: http://127.0.0.1:7860
++echo The app will open at: http://127.0.0.1:%APP_PORT%
+ echo Press Ctrl+C to stop the server
+-echo The chatbot can use hosted or local Llama inference when available.
+-echo If those are unavailable, it will fall back to the local demo chatbot.
+ echo.
+ 
+-python gradio_app.py
++set "GRADIO_SERVER_PORT=%APP_PORT%"
++"%PYTHON_CMD%" gradio_app.py
+ 
+ pause
+diff --git a/run_app.sh b/run_app.sh
+new file mode 100644
+index 0000000..2d57aef
+--- /dev/null
++++ b/run_app.sh
+@@ -0,0 +1,59 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
++cd "$ROOT_DIR"
++
++VENV_DIR=".venv"
++
++create_windows_venv() {
++  py -3.11 -m venv "$VENV_DIR" 2>/dev/null || python -m venv "$VENV_DIR"
++}
++
++create_unix_venv() {
++  python3.11 -m venv "$VENV_DIR" 2>/dev/null || python3 -m venv "$VENV_DIR"
++}
++
++if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* || "$OSTYPE" == win32* ]]; then
++  PYTHON_BIN="$ROOT_DIR/$VENV_DIR/Scripts/python.exe"
++  if [[ ! -x "$PYTHON_BIN" ]]; then
++    echo "Creating virtual environment..."
++    create_windows_venv
++  fi
++else
++  PYTHON_BIN="$ROOT_DIR/$VENV_DIR/bin/python"
++  if [[ ! -x "$PYTHON_BIN" ]]; then
++    echo "Creating virtual environment..."
++    create_unix_venv
++  fi
++fi
++
++if ! "$PYTHON_BIN" -c "import gradio, transformers, pandas, dotenv, scipy, torch; assert hasattr(torch, 'Tensor')" >/dev/null 2>&1; then
++  echo "Installing dependencies..."
++  "$PYTHON_BIN" -m pip install --upgrade pip
++  "$PYTHON_BIN" -m pip install -i https://pypi.org/simple -r requirements.txt
++fi
++
++if [[ ! -f .env && -f .env_example ]]; then
++  cp .env_example .env
++fi
++
++APP_PORT="$($PYTHON_BIN - <<'PY'
++import socket
++
++port = 7860
++while True:
++    with socket.socket() as sock:
++        try:
++            sock.bind(("127.0.0.1", port))
++            print(port)
++            break
++        except OSError:
++            port += 1
++PY
++)"
++
++echo
++echo "Starting app on http://127.0.0.1:${APP_PORT}"
++echo
++GRADIO_SERVER_PORT="$APP_PORT" "$PYTHON_BIN" gradio_app.py
+\ No newline at end of file
+-- 
+2.51.0.windows.1
+
