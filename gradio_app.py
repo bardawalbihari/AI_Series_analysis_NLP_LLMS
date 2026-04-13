@@ -333,6 +333,7 @@ def get_themes(theme_list_str,subtitles_path,save_path):
         y="Score",
         title="Series Themes",
         tooltip=["Theme","Score"],
+        vertical = False,
         vertical=False,
         width=500,
         height=260
